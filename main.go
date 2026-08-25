@@ -3,6 +3,11 @@
 // l'Agent che parla DAVVERO con un TPM 2.0 — qui il simulatore software di
 // google/go-tpm-tools, sostituibile con /dev/tpmrm0 cambiando UNA riga
 // (vedi commento su rot.OpenDevice più sotto) per girare su hardware reale.
+//
+// AGGIORNAMENTO: lo scenario di Replay Attack ora dimostra anche il canale
+// di revoca immediata Verifier->Enforcement (v.OnRevoke/e.Revoke): il
+// routing viene negato nello stesso istante in cui il replay viene
+// rilevato, non più solo alla scadenza naturale del token.
 package main
 
 import (
@@ -20,8 +25,6 @@ import (
 )
 
 const instanceID = "vnf-instance-001"
-
-var pcrSelection = []int{0, 1}
 
 func section(title string) {
 	fmt.Println()
@@ -50,6 +53,18 @@ func main() {
 
 	a := agent.NewAgent(instanceID, root)
 
+	// FIX (scoperto testando end-to-end): client.Key.Attest quota SEMPRE
+	// l'intero banco PCR SHA-256, non un sottoinsieme scelto da noi (vedi
+	// il commento su rot.FullPCRSelection per i dettagli). Usiamo quindi
+	// QUESTA selezione — e non un sottoinsieme arbitrario come {0,1} — sia
+	// per leggere il Golden Measurement in fase di onboarding sia, più
+	// sotto, come parametro "informativo" passato a GetTPMQuote: se la
+	// selezione usata per il Golden Measurement non combacia esattamente
+	// con quella che la quote reale copre, il confronto in verifier.go
+	// fallisce sempre — non per un attacco, ma per un disallineamento tra
+	// cosa abbiamo misurato noi e cosa il TPM ha davvero firmato.
+	pcrSelection := rot.FullPCRSelection()
+
 	// Simula il boot "genuino" dell'istanza: bootloader e OS image
 	// noti-buoni, estesi DAVVERO nei PCR del TPM (reale o simulato).
 	must(a.ExtendPCR(0, []byte("genuine-bootloader-v1.4")))
@@ -71,6 +86,18 @@ func main() {
 	e := enforcement.New(v.PublicKey())
 	fmt.Println("Verifier, Agent (TPM-backed) ed Enforcement Plane inizializzati.")
 	fmt.Println("Istanza registrata con Golden Measurement letto dal TPM.")
+
+	// Collega il canale di revoca immediata: registriamo presso il
+	// Verifier un hook che, quando una generazione viene bruciata (per
+	// qualunque motivo: replay, mismatch PCR, revoca manuale...), chiama
+	// SUBITO e.Revoke(...) invece di aspettare che il token corrente
+	// scada da solo (fino a DefaultTokenTTL = 30s). Questa singola riga è
+	// tutto ciò che main.go deve fare: la logica di "quando" chiamare
+	// l'hook, e la garanzia che venga chiamato a lock rilasciato, sono
+	// già incapsulate dentro verifier.go (vedi VerifyQuote/OnRevoke lì).
+	v.OnRevoke(func(instanceID string, generation int) {
+		e.Revoke(instanceID, generation)
+	})
 
 	// ------------------------------------------------------------------
 	// 1) BOOTSTRAP (g = 0)
@@ -131,8 +158,23 @@ func main() {
 	// ------------------------------------------------------------------
 	section("3) REPLAY ATTACK (riutilizzo del quote già consumato)")
 
+	// Prima di rigiocare il quote, verifichiamo che il routing sia ancora
+	// concesso (conseguenza del rinnovo avvenuto al passo precedente): è
+	// il punto di partenza rispetto a cui misuriamo l'effetto della
+	// revoca immediata qui sotto.
+	fmt.Printf("Enforcement: instradamento consentito PRIMA del replay = %v\n", e.IsRoutingAllowed(instanceID))
+
 	replayOK := v.VerifyQuote(instanceID, *quote1, nonce1)
 	fmt.Printf("VerifyQuote(replay di quote1): %v (atteso: false)\n", replayOK)
+
+	// A differenza della versione precedente di questo file, qui il
+	// routing risulta già negato SUBITO dopo la riga precedente, non dopo
+	// fino a 30 secondi di attesa: VerifyQuote ha rilevato il replay,
+	// bruciato la generazione, e l'hook registrato sopra ha chiamato
+	// e.Revoke(...) PRIMA che questa riga venisse eseguita — nessuna
+	// attesa, nessun timer coinvolto. Corrisponde al passo "Revoca
+	// Immediata Routing" della Fase 4 del sequence diagram del protocollo.
+	fmt.Printf("Enforcement: instradamento consentito DOPO il replay (immediato, senza attendere il TTL) = %v (atteso: false)\n", e.IsRoutingAllowed(instanceID))
 
 	records := v.BurnRecords(instanceID)
 	fmt.Printf("BurnRecords registrati per %s: %d\n", instanceID, len(records))
@@ -142,6 +184,11 @@ func main() {
 
 	_, errIssue := v.IssueToken(instanceID, 0)
 	fmt.Printf("Tentativo di IssueToken su generazione bruciata: errore = %v\n", errIssue)
+
+	// "Migliorato la gestione del replay attack" — è la risposta, non la rilevazione, ad essere migliorata.
+	// Il rilevamento del replay (confronto nonce, usedNonces) era già presente e corretto fin dalla Fase 1/2 — non l'ho toccato.
+	// Quello che è cambiato è cosa succede dopo che il replay viene rilevato: prima il routing restava aperto fino a 30s (TTL),
+	// ora si chiude nello stesso istante. È una distinzione importante da avere chiara: la sicurezza crittografica non è cambiata, è cambiata la velocità di reazione.
 
 	// ------------------------------------------------------------------
 	// 4) FAIL-CLOSED DEFAULT

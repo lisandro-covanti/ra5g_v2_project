@@ -3,11 +3,13 @@
 // Envoy Proxy, CNI). $E$ non contatta mai direttamente il Prover: agisce
 // esclusivamente sulla base di Token firmati emessi dal Verifier.
 //
-// FASE 2: questo file è IDENTICO alla Fase 1, non modificato. È la prova
-// pratica che isolare la logica di business (qui: fail-closed, generation
-// exclusivity sui token) dalla tecnologia di attestazione (TPM) funziona:
-// passare da una simulazione software a un vero TPM per l'Agent/Verifier
-// non ha richiesto toccare l'Enforcement Plane in nessun modo.
+// AGGIORNAMENTO: rispetto alla prima versione della Fase 2 (dove questo
+// file era identico byte-per-byte alla Fase 1), è stato aggiunto un solo
+// metodo, Revoke, che apre un canale di notifica diretta dal Verifier
+// verso l'Enforcement per la revoca immediata del routing (invece di
+// affidarsi solo alla scadenza naturale del token). Tutto il resto del
+// file — ValidateToken, UpdateRoutingRules, IsRoutingAllowed, il default
+// Fail-Closed — resta invariato.
 package enforcement
 
 import (
@@ -118,6 +120,58 @@ func (e *Enforcement) denyLocked(instanceID string) {
 	} else {
 		e.routes[instanceID] = &routeState{Allowed: false}
 	}
+}
+
+// Revoke forza IMMEDIATAMENTE la negazione del routing per una specifica
+// coppia (instanceID, generation), SENZA aspettare la scadenza naturale
+// del token corrente (ExpiresAt).
+//
+// PERCHÉ SERVE (gap colmato rispetto alla prima versione di questo file):
+// prima d'ora, l'UNICO modo per interrompere il routing era il timeout
+// del token (fino a DefaultTokenTTL = 30s dal Verifier). Se il Verifier
+// scopriva un replay attack o un mismatch PCR e bruciava la generazione,
+// l'Enforcement non veniva MAI avvisato attivamente: continuava a
+// instradare il traffico verso l'istanza compromessa finché il token in
+// suo possesso non scadeva da solo. Questo metodo è il canale diretto che
+// il Verifier chiama (tramite un hook registrato in main.go — vedi
+// verifier.go) nell'istante stesso in cui rileva un'anomalia, corrispondente
+// al passo "Revoca Immediata Routing" della Fase 4 del sequence diagram.
+//
+// Chi chiama questo metodo (il Verifier, tramite hook) NON deve MAI farlo
+// mentre detiene il proprio lock interno (v.mu) — altrimenti, se in futuro
+// questo metodo (o un suo effetto a catena) richiamasse un metodo del
+// Verifier che a sua volta prova a riacquisire v.mu, si creerebbe un
+// deadlock: una goroutine che aspetta un lock che possiede già lei stessa.
+// Questa garanzia è responsabilità del CHIAMANTE (verifier.go: gli hook
+// vengono sempre invocati DOPO che il lock del Verifier è stato rilasciato)
+// — Enforcement.Revoke di per sé è "innocuo" da questo punto di vista,
+// perché usa solo e.mu, un mutex diverso e indipendente da quello del
+// Verifier: non può MAI essere lui a causare quel particolare deadlock.
+func (e *Enforcement) Revoke(instanceID string, generation int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	rs, ok := e.routes[instanceID]
+	if !ok {
+		// Nessuna regola di routing attiva per questa istanza: non c'è
+		// nulla da revocare (può succedere se il Verifier notifica un
+		// burn per un'istanza che l'Enforcement non ha ancora mai visto,
+		// ad esempio un fallimento già al primissimo Bootstrap, prima
+		// che UpdateRoutingRules sia mai stato chiamato con successo).
+		return
+	}
+	if rs.Generation != generation {
+		// Guardia contro eventi "in ritardo": se l'istanza è nel
+		// frattempo GIÀ passata a una generazione più recente (es. dopo
+		// una migrazione riuscita), una notifica di burn arrivata tardi
+		// e riferita alla VECCHIA generazione non deve interrompere il
+		// routing della generazione ATTUALE, più recente e legittima.
+		// Senza questo controllo, un evento ormai obsoleto potrebbe
+		// interrompere traffico corretto — è la stessa logica di
+		// Generation Exclusivity già applicata altrove in questo file.
+		return
+	}
+	rs.Allowed = false
 }
 
 // IsRoutingAllowed è la funzione che il data-plane (Envoy/CNI) invocherebbe

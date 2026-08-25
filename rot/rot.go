@@ -25,6 +25,30 @@ import (
 	"github.com/google/go-tpm/tpmutil"
 )
 
+// FullPCRSelection restituisce l'elenco COMPLETO degli indici PCR (sul
+// banco SHA-256) che client.Key.Attest include SEMPRE nella quote.
+//
+// FIX (scoperto testando end-to-end): a differenza di quanto avevo
+// assunto scrivendo la prima versione di questo file, client.Key.Attest
+// NON offre alcun modo di restringere la quote a un sottoinsieme di PCR —
+// la struct AttestOpts espone solo Nonce e TCGEventLog, nessun campo di
+// selezione PCR. La quote prodotta copre SEMPRE l'intero banco (tutti i
+// PCR del TPM, tipicamente 24), indipendentemente da cosa passiamo come
+// "pcrSelection" alle nostre funzioni. Questa funzione restituisce
+// esattamente quell'insieme completo, così che main.go possa calcolare il
+// Golden Measurement sugli STESSI PCR che la quote reale coprirà — se
+// calcolato solo su un sottoinsieme (come nella versione precedente,
+// erroneamente limitata a {0,1}), il confronto in verifier.go fallirebbe
+// SEMPRE, non per un attacco reale ma per un disallineamento tra cosa
+// abbiamo misurato noi e cosa il TPM ha effettivamente firmato.
+//
+// Non richiede una connessione TPM aperta (non ha un receiver *TPM2RootOfTrust):
+// è pura logica desunta dalla libreria, la stessa usata internamente da
+// client.Key.Attest per decidere cosa quotare.
+func FullPCRSelection() []int {
+	return tpmtoolsclient.FullPcrSel(tpm2.AlgSHA256).PCRs
+}
+
 // RootOfTrust è l'interfaccia che l'Agent usa per produrre evidenza
 // firmata dal TPM. Qualunque implementazione — TPM reale, simulatore
 // software, o (in futuro) altra tecnologia di secure element — deve
@@ -180,11 +204,22 @@ func (t *TPM2RootOfTrust) ReadPCRs(pcrSelection []int) (map[int][]byte, error) {
 
 // Attest implementa RootOfTrust chiamando client.Key.Attest(), che
 // internamente:
-//  1. legge i valori correnti dei PCR richiesti;
-//  2. raccoglie l'event log di boot/IMA disponibile;
+//  1. legge i valori correnti di TUTTI i PCR del banco SHA-256 (non solo
+//     quelli passati in pcrSelection — vedi il commento su FullPCRSelection
+//     più sopra: client.Key.Attest non supporta una selezione parziale);
+//  2. raccoglie l'event log di boot/IMA disponibile (disattivato in questo
+//     scheletro tramite TCGEventLog: []byte{}, vedi sotto);
 //  3. esegue TPM2_Quote con la AK su quei PCR, includendo il nonce come
 //     ExtraData del TPMS_ATTEST prodotto dal TPM;
 //  4. impacchetta tutto in un unico messaggio Attestation.
+//
+// Il parametro pcrSelection resta nella firma di questo metodo per
+// coerenza con l'interfaccia RootOfTrust e in previsione di una futura
+// implementazione (magari basata sull'API TPMDirect di go-tpm, più
+// granulare) che sappia davvero rispettarlo — ma con l'attuale libreria
+// google/go-tpm-tools NON ha alcun effetto sulla quote prodotta: chi
+// chiama questa funzione deve calcolare qualunque Golden Measurement
+// usando rot.FullPCRSelection(), non un proprio sottoinsieme arbitrario.
 //
 // Tutto questo corrisponde, nel documento di analisi originale, alla
 // combinazione di GetTPMQuote() + GetMeasurementLog(): in Fase 2 le due
@@ -194,11 +229,27 @@ func (t *TPM2RootOfTrust) ReadPCRs(pcrSelection []int) (map[int][]byte, error) {
 func (t *TPM2RootOfTrust) Attest(pcrSelection []int, nonce []byte) (*attestpb.Attestation, error) {
 	attestation, err := t.ak.Attest(tpmtoolsclient.AttestOpts{
 		Nonce: nonce,
-		// TCGEventLog: qui si potrebbe passare esplicitamente il log
-		// binario raccolto da firmware/bootloader (es. da
-		// /sys/kernel/security/tpm0/binary_bios_measurements su Linux);
-		// omesso in questo scheletro perché il simulatore software non lo
-		// popola comunque in modo realistico.
+
+		// FIX (scoperto testando su Windows): se il campo TCGEventLog
+		// viene lasciato al suo valore di default (nil, "non impostato"),
+		// client.Key.Attest prova AUTOMATICAMENTE a leggere l'event log
+		// di boot direttamente dal sistema operativo ospite (su Linux da
+		// /sys/kernel/security/tpm0/binary_bios_measurements). Quella
+		// funzione di lettura è implementata SOLO per Linux nella libreria
+		// google/go-tpm-tools: su qualunque altro OS (Windows, macOS)
+		// fallisce con "only Linux supported", interrompendo l'intero
+		// Attest anche quando si sta usando il simulatore software (che
+		// comunque non avrebbe un vero event log di sistema coerente da
+		// offrire). Per evitarlo, passiamo esplicitamente uno slice VUOTO
+		// (non nil): un []byte{} soddisfa il controllo "è stato fornito
+		// un valore" e disattiva il tentativo di auto-lettura dal SO,
+		// mentre lasciare il campo del tutto assente (nil) lo riattiva.
+		// Il prezzo di questa scelta: l'Attestation prodotta non porta
+		// un vero TCG event log — accettabile per questo scheletro
+		// Fase 2, dato che comunque la nostra logica applicativa (in
+		// verifier.go) valuta il Golden Measurement sul PCRDigest
+		// estratto dal TPMS_ATTEST, non sul contenuto dell'event log.
+		TCGEventLog: []byte{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rot: Attest fallito: %w", err)
