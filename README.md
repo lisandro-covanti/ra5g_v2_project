@@ -1,2 +1,13 @@
 # ra5g_v2_project
 Project 5GC Continuos Remote Attestation
+
+
+---RIEPILOGO FILE TEST---
+
+cryptoutil_test.go verifica il livello crittografico più basso del progetto, quello su cui tutto il resto si appoggia implicitamente: firma e verifica RSA vanno a buon fine sul percorso corretto, ma soprattutto falliscono quando devono fallire — un messaggio alterato anche di un solo carattere, una chiave pubblica sbagliata, input nil. Include anche due test sui nonce (NewNonce): che due chiamate consecutive non producano mai lo stesso valore, e che rispettino la lunghezza richiesta. È il file più importante nonostante sia il più piccolo, perché un bug qui (es. Verify che accetta sempre) resterebbe mascherato da tutti gli altri test, che generano sempre chiavi "coerenti tra loro".
+
+model_test.go si concentra su un rischio sottile: che SignedBytes() (la codifica su cui il Verifier calcola le firme di Token e GenerationLinkCert) produca collisioni — cioè che due contenuti diversi (es. Generation=0 vs Generation=1, o due TargetHost diversi in una futura migrazione) finiscano per produrre esattamente la stessa sequenza di byte da firmare. Se succedesse, una firma varrebbe anche per un contenuto diverso da quello originale, un problema di sicurezza silenzioso. Verifica anche che la codifica sia deterministica (stesso input, sempre stesso output).
+
+agent_test.go introduce un concetto nuovo rispetto ai file precedenti: un test double — un fakeRootOfTrust scritto apposta per i test, che implementa l'interfaccia rot.RootOfTrust restituendo dati fittizi istantanei invece di parlare con un vero TPM. Grazie a questo, i test verificano solo la logica propria di agent.go (che ExtendPCR deleghi correttamente, che gli errori del RoT vengano propagati intatti, che GetTPMQuote costruisca un QuotePayload corretto e che l'AttestationBlob prodotto, deserializzato, corrisponda esattamente a quanto restituito dal RoT) senza il costo e la lentezza di un TPM reale o simulato — è il beneficio pratico concreto dell'aver isolato quella dipendenza dietro un'interfaccia fin dall'inizio.
+
+verifier_test.go ed enforcement_test.go (già presenti) coprono invece la logica di business pura di ciascun componente — hook di revoca, Fail-Closed, Generation Exclusivity — mentre main_test.go resta l'unico livello che esercita davvero l'intero stack insieme, TPM simulato incluso, per garantire che i pezzi funzionino correttamente anche una volta assemblati.
