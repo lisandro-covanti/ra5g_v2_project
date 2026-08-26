@@ -140,3 +140,179 @@ func TestGenerationLinkCertSignedBytesCambiaConGenerazioni(t *testing.T) {
 		t.Fatal("scambiare OldGeneration/NewGeneration deve produrre SignedBytes() diversi")
 	}
 }
+
+// I test seguenti riguardano ContextBoundNonce, introdotta per il
+// meccanismo di context-binding del nonce: stessa logica anti-collisione
+// applicata sopra a Token/GenerationLinkCert, qui applicata alla funzione
+// che lega insieme tag, instanceID, generation e nonce prima che il TPM
+// lo firmi (vedi agent.go/verifier.go).
+
+// TestContextBoundNonceDeterministico verifica che, a parità di input,
+// ContextBoundNonce produca sempre lo stesso output — necessario perché
+// Agent (che lo calcola prima della firma) e Verifier (che lo ricalcola
+// prima della verifica) DEVONO ottenere bit per bit lo stesso valore.
+func TestContextBoundNonceDeterministico(t *testing.T) {
+	nonce := []byte("nonce-di-esempio")
+
+	a := ContextBoundNonce(ContextTagBoot, "vnf-1", 0, nonce)
+	b := ContextBoundNonce(ContextTagBoot, "vnf-1", 0, nonce)
+
+	if string(a) != string(b) {
+		t.Fatal("ContextBoundNonce deve essere deterministico: stessi input, stesso output, sempre")
+	}
+}
+
+// TestContextBoundNonceCambiaConTag è la proprietà di sicurezza centrale
+// del context-binding: a parità di tutto il resto, un tag diverso deve
+// produrre un valore diverso — altrimenti una quote prodotta per un
+// contesto (es. Renew) potrebbe essere accettata anche per un contesto
+// diverso (es. Migrate) semplicemente cambiando il campo Tag dichiarato,
+// senza che il TPM se ne accorga.
+func TestContextBoundNonceCambiaConTag(t *testing.T) {
+	nonce := []byte("stesso-nonce")
+
+	boot := ContextBoundNonce(ContextTagBoot, "vnf-1", 0, nonce)
+	renew := ContextBoundNonce(ContextTagRenew, "vnf-1", 0, nonce)
+	migrate := ContextBoundNonce(ContextTagMigrate, "vnf-1", 0, nonce)
+
+	if string(boot) == string(renew) || string(boot) == string(migrate) || string(renew) == string(migrate) {
+		t.Fatal("tag diversi devono produrre ContextBoundNonce diversi, a parità di instanceID/generation/nonce")
+	}
+}
+
+// TestContextBoundNonceCambiaConInstanceID verifica che una quote
+// prodotta per un'istanza non possa essere "riattribuita" a un'altra
+// istanza semplicemente dichiarando un InstanceID diverso nel QuotePayload.
+func TestContextBoundNonceCambiaConInstanceID(t *testing.T) {
+	nonce := []byte("stesso-nonce")
+
+	a := ContextBoundNonce(ContextTagBoot, "vnf-1", 0, nonce)
+	b := ContextBoundNonce(ContextTagBoot, "vnf-2", 0, nonce)
+
+	if string(a) == string(b) {
+		t.Fatal("instanceID diversi devono produrre ContextBoundNonce diversi")
+	}
+}
+
+// TestContextBoundNonceCambiaConGeneration verifica che una quote
+// prodotta per una generazione non possa essere presentata come valida
+// per una generazione diversa della stessa istanza.
+func TestContextBoundNonceCambiaConGeneration(t *testing.T) {
+	nonce := []byte("stesso-nonce")
+
+	a := ContextBoundNonce(ContextTagBoot, "vnf-1", 0, nonce)
+	b := ContextBoundNonce(ContextTagBoot, "vnf-1", 1, nonce)
+
+	if string(a) == string(b) {
+		t.Fatal("generation diverse devono produrre ContextBoundNonce diversi")
+	}
+}
+
+// TestContextBoundNonceInstanceIDLunghezzaVariabileNonCollide è un test
+// mirato sulla scelta di codifica: instanceID è l'unico campo di
+// lunghezza variabile che precede altri campi in ContextBoundNonce, per
+// questo la funzione lo prefissa con la sua lunghezza (vedi il commento
+// in types.go). Senza quel prefisso, concatenare "ab"+"c" e "a"+"bc"
+// darebbe la stessa sequenza di byte "abc" — questo test costruisce
+// esattamente quel caso limite per verificare che la codifica a
+// lunghezza esplicita lo prevenga.
+func TestContextBoundNonceInstanceIDLunghezzaVariabileNonCollide(t *testing.T) {
+	nonce := []byte("nonce-fisso")
+
+	// Caso A: instanceID="ab", generation=0 (le cifre di "generation"
+	// sono comunque codificate a lunghezza fissa da binary.BigEndian, ma
+	// costruiamo instanceID in modo che, SENZA length-prefix, "ab"+resto
+	// e "a"+"b"+resto potrebbero confondersi).
+	a := ContextBoundNonce(ContextTagBoot, "ab", 0, nonce)
+	b := ContextBoundNonce(ContextTagBoot, "a", 0, append([]byte("b"), nonce...))
+
+	if string(a) == string(b) {
+		t.Fatal("la codifica di ContextBoundNonce non deve permettere collisioni tra instanceID e nonce di lunghezza diversa ma concatenazione simile")
+	}
+}
+
+// I test seguenti riguardano MigrationSourceBoundNonce (Fase 3): stessa
+// logica anti-collisione applicata sopra, qui sulla funzione che lega la
+// quote dell'istanza USCENTE durante una migrazione anche all'host di
+// destinazione — il campo aggiuntivo rispetto a ContextBoundNonce.
+
+// TestMigrationSourceBoundNonceDeterministico verifica che, a parità di
+// input, la funzione produca sempre lo stesso output — necessario perché
+// Agent (che la calcola prima della firma, in GetMigrationSourceQuote) e
+// Verifier (che la ricalcola in validateMigrationSourceLocked) devono
+// ottenere bit per bit lo stesso valore.
+func TestMigrationSourceBoundNonceDeterministico(t *testing.T) {
+	nonce := []byte("nonce-migrazione")
+
+	a := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-a")
+	b := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-a")
+
+	if string(a) != string(b) {
+		t.Fatal("MigrationSourceBoundNonce deve essere deterministico: stessi input, stesso output, sempre")
+	}
+}
+
+// TestMigrationSourceBoundNonceCambiaConTargetHost è la proprietà di
+// sicurezza centrale di questa funzione: a parità di tutto il resto, un
+// host di destinazione diverso deve produrre un valore diverso —
+// altrimenti una quote con cui un'istanza acconsente a migrare verso
+// l'host A potrebbe essere presentata al Verifier come valida anche per
+// una migrazione verso l'host B.
+func TestMigrationSourceBoundNonceCambiaConTargetHost(t *testing.T) {
+	nonce := []byte("nonce-migrazione")
+
+	a := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-a.esempio.local")
+	b := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-attaccante.esempio.local")
+
+	if string(a) == string(b) {
+		t.Fatal("host di destinazione diversi devono produrre MigrationSourceBoundNonce diversi")
+	}
+}
+
+// TestMigrationSourceBoundNonceCambiaConOldGeneration verifica che una
+// quote di migrazione prodotta per una generazione uscente non possa
+// essere presentata come valida per una generazione diversa della stessa
+// istanza (stessa proprietà già verificata per ContextBoundNonce, qui
+// applicata al campo OldGeneration).
+func TestMigrationSourceBoundNonceCambiaConOldGeneration(t *testing.T) {
+	nonce := []byte("nonce-migrazione")
+
+	a := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-a")
+	b := MigrationSourceBoundNonce("vnf-1", 1, nonce, "host-a")
+
+	if string(a) == string(b) {
+		t.Fatal("oldGeneration diverse devono produrre MigrationSourceBoundNonce diversi")
+	}
+}
+
+// TestMigrationSourceBoundNonceCambiaConInstanceID verifica che una quote
+// di migrazione non possa essere "riattribuita" a un'istanza diversa da
+// quella che l'ha realmente prodotta.
+func TestMigrationSourceBoundNonceCambiaConInstanceID(t *testing.T) {
+	nonce := []byte("nonce-migrazione")
+
+	a := MigrationSourceBoundNonce("vnf-1", 0, nonce, "host-a")
+	b := MigrationSourceBoundNonce("vnf-2", 0, nonce, "host-a")
+
+	if string(a) == string(b) {
+		t.Fatal("instanceID diversi devono produrre MigrationSourceBoundNonce diversi")
+	}
+}
+
+// TestMigrationSourceBoundNonceDiversoDaContextBoundNonce verifica che,
+// a parità di tag/instanceID/generation/nonce, MigrationSourceBoundNonce
+// (che include anche targetHost) e ContextBoundNonce (che non lo include)
+// producano valori DIVERSI — altrimenti una quote di Bootstrap/Renew
+// potrebbe, in teoria, risultare accettabile anche come quote di
+// migrazione o viceversa, semplicemente perché le due funzioni
+// producessero output identici quando targetHost è vuoto.
+func TestMigrationSourceBoundNonceDiversoDaContextBoundNonce(t *testing.T) {
+	nonce := []byte("stesso-nonce")
+
+	migrazione := MigrationSourceBoundNonce("vnf-1", 0, nonce, "")
+	generico := ContextBoundNonce(ContextTagMigrate, "vnf-1", 0, nonce)
+
+	if string(migrazione) == string(generico) {
+		t.Fatal("MigrationSourceBoundNonce e ContextBoundNonce devono produrre valori diversi anche a parità di tag/instanceID/generation/nonce (targetHost vuoto incluso)")
+	}
+}

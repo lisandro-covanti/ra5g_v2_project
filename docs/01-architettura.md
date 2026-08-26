@@ -65,21 +65,34 @@ contrario).
   di prototipazione): incapsula opaco un `AttestationBlob` (la vera
   struttura TPM standard `TPMS_ATTEST`+`TPMT_SIGNATURE`, serializzata
   Protobuf da `google/go-tpm-tools`), più i metadati applicativi
-  `InstanceID`, `Generation`, `Tag`, `Nonce`.
+  `InstanceID`, `Generation`, `Tag`, `Nonce`, `TargetHost` (quest'ultimo
+  usato solo nella quote di migrazione dell'istanza uscente, vedi Fase 3
+  sotto).
 - **`ContextTag`** — identifica il tipo di operazione per cui una quote
   è stata richiesta (`Boot`, `Renew`, `Migrate`). Vedi
   [`03-problemi-e-soluzioni.md`](03-problemi-e-soluzioni.md#context-binding-del-nonce)
   per il problema di sicurezza che risolve.
 - **`ContextBoundNonce(tag, instanceID, generation, nonce)`** — la
   codifica canonica che lega insieme questi quattro valori in un unico
-  digest, effettivamente firmato dal TPM al posto del nonce nudo.
+  digest, effettivamente firmato dal TPM al posto del nonce nudo. Usata
+  per Bootstrap, Renew, e per la quote dell'istanza ENTRANTE in una
+  migrazione.
+- **`MigrationSourceBoundNonce(instanceID, oldGeneration, nonce, targetHost)`**
+  — variante usata SOLO dalla quote dell'istanza USCENTE durante una
+  migrazione: lega anche l'host di destinazione, non solo tag/instanceID/
+  generation/nonce. Vedi
+  [`06-fase3-migrazione.md`](06-fase3-migrazione.md) per il dettaglio, e
+  [`03-problemi-e-soluzioni.md`](03-problemi-e-soluzioni.md#la-collisione-in-migrationsourceboundnonce)
+  per un bug reale scoperto da un test su questa funzione.
 - **`Token`** — il "visto d'accesso a tempo" che il Verifier emette per
   l'Enforcement Plane, firmato con la chiave operativa del Verifier
   (`sk_V`, RSA software — **non** TPM-backed, per una ragione precisa:
   vedi sotto).
 - **`BurnRecord`** — registro permanente di revoca di una generazione.
-- **`GenerationLinkCert`** — predisposto per la Fase 3 (Migrazione), non
-  ancora usato nel codice attuale.
+- **`GenerationLinkCert`** — firmato da `CompleteMigration` (Fase 3) al
+  termine di una migrazione riuscita: lega crittograficamente la
+  generazione uscente (`OldGeneration`) a quella entrante
+  (`NewGeneration`), insieme a `MigNonce` e `TargetHost`.
 
 ## Perché `sk_V` (la chiave del Verifier) resta RSA software, non TPM
 
@@ -100,8 +113,9 @@ l'Agent a dover provare "sono davvero questa macchina, in questo stato".
 ## Confini di fiducia — cosa NON è (ancora) risolto
 
 Il codice attuale presume che, quando il Verifier riceve una chiave
-pubblica AK durante l'onboarding (`RegisterInstance`), quella chiave
-provenga davvero da un TPM genuino. Questa fiducia è oggi **assunta, non
+pubblica AK durante l'onboarding (`RegisterInstance`, e — dalla Fase 3 —
+anche `CompleteMigration` per l'host target), quella chiave provenga
+davvero da un TPM genuino. Questa fiducia è oggi **assunta, non
 verificata**: manca il passo di certificazione EK→AK (challenge
 `TPM2_ActivateCredential` contro un certificato EK di fabbrica) che, in
 un deployment reale, proverebbe che l'AK è davvero vincolata

@@ -132,12 +132,12 @@ func bootstrap(t *testing.T, sys *testSystem) (*model.QuotePayload, []byte) {
 		t.Fatalf("GenerateNonce: %v", err)
 	}
 
-	quote, err := sys.agent.GetTPMQuote(0, nonce, sys.pcrSelection)
+	quote, err := sys.agent.GetTPMQuote(0, nonce, sys.pcrSelection, model.ContextTagBoot)
 	if err != nil {
 		t.Fatalf("GetTPMQuote: %v", err)
 	}
 
-	if ok := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce); !ok {
+	if ok := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce, model.ContextTagBoot); !ok {
 		t.Fatal("VerifyQuote deve restituire true per un bootstrap genuino")
 	}
 
@@ -175,12 +175,12 @@ func TestContinuousAttestationRinnovaIlToken(t *testing.T) {
 		t.Fatalf("GenerateNonce (rinnovo): %v", err)
 	}
 
-	quote, err := sys.agent.GetTPMQuote(0, nonce, sys.pcrSelection)
+	quote, err := sys.agent.GetTPMQuote(0, nonce, sys.pcrSelection, model.ContextTagRenew)
 	if err != nil {
 		t.Fatalf("GetTPMQuote (rinnovo): %v", err)
 	}
 
-	if ok := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce); !ok {
+	if ok := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce, model.ContextTagRenew); !ok {
 		t.Fatal("VerifyQuote deve restituire true per un rinnovo con la stessa generazione")
 	}
 
@@ -215,7 +215,7 @@ func TestReplayAttackVieneRilevatoERoutingChiusoSubito(t *testing.T) {
 
 	// Rigiochiamo DELIBERATAMENTE lo stesso quote/nonce del bootstrap,
 	// simulando un attaccante che intercetta e ritrasmette il messaggio.
-	if replayOK := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce); replayOK {
+	if replayOK := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce, model.ContextTagBoot); replayOK {
 		t.Fatal("un replay attack non deve mai superare la verifica")
 	}
 
@@ -281,5 +281,329 @@ func TestFailClosedIstanzaMaiAttestata(t *testing.T) {
 
 	if sys.enforcement.IsRoutingAllowed("istanza-completamente-diversa-mai-vista") {
 		t.Fatal("un'istanza mai attestata deve risultare non instradabile per default (Fail-Closed)")
+	}
+}
+
+// TestContextTagSbagliatoRifiutaAncheUnaQuoteTPMRealmenteValida è il
+// complemento end-to-end di TestVerifyQuoteRifiutaTagDiContestoNonCorrispondente
+// (quel test, in verifier_test.go, usa un AttestationBlob fittizio perché
+// il controllo del tag avviene prima della verifica crittografica). Qui
+// invece produciamo una quote REALE, firmata da un vero TPM simulato,
+// con PCR corretti — e dimostriamo che VIENE COMUNQUE RIFIUTATA se la si
+// presenta con un tag diverso da quello con cui è stata prodotta. La
+// ragione è più profonda del semplice controllo esplicito su quote.Tag:
+// il nonce che il TPM ha effettivamente firmato è vincolato al tag
+// ORIGINALE (Renew), quindi anche se qualcuno alterasse il campo Tag nel
+// QuotePayload per "farlo sembrare" un Boot, il confronto crittografico
+// in server.VerifyAttestation fallirebbe comunque, perché il Verifier
+// ricalcolerebbe un nonce vincolato diverso (con tag Boot) da quello
+// realmente firmato — due strati di difesa indipendenti, come descritto
+// nel commento di verifier.go.
+func TestContextTagSbagliatoRifiutaAncheUnaQuoteTPMRealmenteValida(t *testing.T) {
+	sys := setupTestSystem(t)
+
+	nonce, err := sys.verifier.GenerateNonce(sys.instanceID)
+	if err != nil {
+		t.Fatalf("GenerateNonce: %v", err)
+	}
+
+	// L'Agent produce una quote REALE e valida per un RINNOVO.
+	quote, err := sys.agent.GetTPMQuote(0, nonce, sys.pcrSelection, model.ContextTagRenew)
+	if err != nil {
+		t.Fatalf("GetTPMQuote: %v", err)
+	}
+
+	// Il Verifier, però, si aspettava una risposta di BOOTSTRAP per
+	// questa challenge (scenario: un bug altrove nel sistema, o un
+	// tentativo deliberato di riutilizzo fuori contesto).
+	if ok := sys.verifier.VerifyQuote(sys.instanceID, *quote, nonce, model.ContextTagBoot); ok {
+		t.Fatal("una quote TPM valida ma con tag di contesto sbagliato non deve mai superare la verifica")
+	}
+}
+
+
+// ============================================================================
+// FASE 3 — Migrazione Cooperativa: test end-to-end con DUE simulatori TPM
+// indipendenti (sorgente e destinazione).
+//
+// FIX DI BLOCCO (importante): la prima versione di questi test usava
+// setupMigrationTarget per aprire il simulatore dell'host target MENTRE
+// quello dell'host sorgente (dentro "sys", da setupTestSystem) era ancora
+// aperto — stesso identico problema, e stessa causa, già diagnosticati e
+// corretti in main.go: aprire un secondo simulatore
+// google/go-tpm-tools/simulator mentre un altro è ancora vivo nello
+// stesso processo Go si blocca INDEFINITAMENTE (osservato per oltre 2
+// ore in una precedente esecuzione di main.go, prima della correzione).
+//
+// La correzione: ciascun simulatore vive dentro la propria funzione
+// helper (runMigrationSourcePhaseForTest, runMigrationTargetPhaseForTest),
+// con un "defer" che lo chiude al RITORNO di QUELLA funzione — non
+// tramite t.Cleanup, che scatterebbe solo alla fine dell'intero test
+// (troppo tardi: il simulatore sorgente deve essere chiuso PRIMA che
+// quello target venga aperto, a metà dello stesso test). t.Cleanup resta
+// invece perfettamente adatto per setupTestSystem (usato dagli altri
+// test di questo file), perché lì un solo simulatore alla volta è mai
+// aperto per l'intera durata del test.
+// ============================================================================
+
+// migrationSourceResult raccoglie SOLO dati (non risorse TPM ancora
+// aperte) da restituire dopo la fase sorgente: il nonce di migrazione,
+// unico valore che la fase target deve conoscere per proseguire.
+type migrationSourceResult struct {
+	nMig []byte
+}
+
+// runMigrationSourcePhaseForTest apre il simulatore TPM dell'host
+// SORGENTE, esegue un mini-Bootstrap dell'istanza (identico nella forma
+// alla Fase 1) e produce/valida Q_src, poi lo CHIUDE (i due "defer"
+// scattano al ritorno di QUESTA funzione) prima di restituire il
+// controllo al test chiamante — che potrà quindi aprire in sicurezza il
+// simulatore dell'host target.
+func runMigrationSourcePhaseForTest(t *testing.T, v *verifier.Verifier, e *enforcement.Enforcement, pcrSelection []int, migInstanceID, targetHost string) migrationSourceResult {
+	t.Helper()
+
+	srcConn, err := rot.OpenSimulator()
+	if err != nil {
+		t.Fatalf("rot.OpenSimulator (source): %v", err)
+	}
+	defer func() { _ = srcConn.Close() }()
+
+	srcRoot, err := rot.NewTPM2RootOfTrust(srcConn)
+	if err != nil {
+		t.Fatalf("rot.NewTPM2RootOfTrust (source): %v", err)
+	}
+	defer func() { _ = srcRoot.Close() }()
+
+	srcAgent := agent.NewAgent(migInstanceID, srcRoot)
+
+	if err := srcAgent.ExtendPCR(0, []byte("genuine-bootloader-v1.4")); err != nil {
+		t.Fatalf("ExtendPCR(0) source: %v", err)
+	}
+	if err := srcAgent.ExtendPCR(1, []byte("genuine-os-image-sha256:abc123")); err != nil {
+		t.Fatalf("ExtendPCR(1) source: %v", err)
+	}
+
+	srcPCRs, err := srcRoot.ReadPCRs(pcrSelection)
+	if err != nil {
+		t.Fatalf("ReadPCRs (source): %v", err)
+	}
+	srcGolden := combinedPCRDigest(srcPCRs, pcrSelection)
+	v.RegisterInstance(migInstanceID, srcRoot.PublicKey(), srcGolden)
+
+	nonce, err := v.GenerateNonce(migInstanceID)
+	if err != nil {
+		t.Fatalf("GenerateNonce: %v", err)
+	}
+	quote, err := srcAgent.GetTPMQuote(0, nonce, pcrSelection, model.ContextTagBoot)
+	if err != nil {
+		t.Fatalf("GetTPMQuote (bootstrap source): %v", err)
+	}
+	if ok := v.VerifyQuote(migInstanceID, *quote, nonce, model.ContextTagBoot); !ok {
+		t.Fatal("il bootstrap dell'istanza di migrazione doveva riuscire")
+	}
+	token, err := v.IssueToken(migInstanceID, 0)
+	if err != nil {
+		t.Fatalf("IssueToken (bootstrap source): %v", err)
+	}
+	e.UpdateRoutingRules(token)
+
+	nMig, err := v.BeginMigration(migInstanceID, targetHost)
+	if err != nil {
+		t.Fatalf("BeginMigration: %v", err)
+	}
+
+	qSrc, err := srcAgent.GetMigrationSourceQuote(0, nMig, pcrSelection, targetHost)
+	if err != nil {
+		t.Fatalf("GetMigrationSourceQuote: %v", err)
+	}
+	if ok := v.ValidateMigrationSource(migInstanceID, *qSrc); !ok {
+		t.Fatal("ValidateMigrationSource doveva riuscire per una Q_src genuina")
+	}
+
+	return migrationSourceResult{nMig: nMig}
+}
+
+// runMigrationTargetPhaseForTest apre il simulatore TPM dell'host
+// TARGET — chiamata SOLO dopo che runMigrationSourcePhaseForTest è già
+// tornata (e ha quindi già chiuso il proprio simulatore: in Go, senza
+// l'uso di goroutine, una funzione gira per intero fino al suo "return"
+// prima che l'istruzione successiva nel chiamante venga eseguita, quindi
+// l'ordine sequenziale delle due chiamate nei test sotto GARANTISCE che i
+// due simulatori non siano mai aperti insieme). Produce Q_dst ed esegue
+// CompleteMigration.
+//
+// Se goldenOverride non è nil, viene usato al posto del Golden
+// Measurement realmente misurato sul target: permette a
+// TestMigrazioneTargetNonValidaNonComprometteSorgente di simulare un
+// mismatch deliberato mantenendo comunque una quote TPM realmente
+// firmata (non un dato fittizio) per il resto del flusso.
+func runMigrationTargetPhaseForTest(t *testing.T, v *verifier.Verifier, e *enforcement.Enforcement, pcrSelection []int, migInstanceID string, nMig []byte, newGeneration int, goldenOverride []byte) (*model.Token, *model.GenerationLinkCert, bool) {
+	t.Helper()
+
+	dstConn, err := rot.OpenSimulator()
+	if err != nil {
+		t.Fatalf("rot.OpenSimulator (target): %v", err)
+	}
+	defer func() { _ = dstConn.Close() }()
+
+	dstRoot, err := rot.NewTPM2RootOfTrust(dstConn)
+	if err != nil {
+		t.Fatalf("rot.NewTPM2RootOfTrust (target): %v", err)
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	dstAgent := agent.NewAgent(migInstanceID, dstRoot)
+
+	if err := dstAgent.ExtendPCR(0, []byte("genuine-bootloader-v1.4")); err != nil {
+		t.Fatalf("ExtendPCR(0) target: %v", err)
+	}
+	if err := dstAgent.ExtendPCR(1, []byte("genuine-os-image-sha256:abc123")); err != nil {
+		t.Fatalf("ExtendPCR(1) target: %v", err)
+	}
+
+	dstGolden := goldenOverride
+	if dstGolden == nil {
+		dstPCRs, err := dstRoot.ReadPCRs(pcrSelection)
+		if err != nil {
+			t.Fatalf("ReadPCRs (target): %v", err)
+		}
+		dstGolden = combinedPCRDigest(dstPCRs, pcrSelection)
+	}
+
+	qDst, err := dstAgent.GetTPMQuote(newGeneration, nMig, pcrSelection, model.ContextTagMigrate)
+	if err != nil {
+		t.Fatalf("GetTPMQuote (target): %v", err)
+	}
+
+	return v.CompleteMigration(migInstanceID, newGeneration, *qDst, dstRoot.PublicKey(), dstGolden)
+}
+
+// TestMigrazioneCooperativaCompleta è il percorso "felice" end-to-end
+// completo: Bootstrap sull'host sorgente, avvio della migrazione,
+// validazione di Q_src, boot misurato sull'host target, validazione di
+// Q_dst con Atomic Commit, ed esito finale sull'Enforcement.
+func TestMigrazioneCooperativaCompleta(t *testing.T) {
+	v, err := verifier.New()
+	if err != nil {
+		t.Fatalf("verifier.New: %v", err)
+	}
+	e := enforcement.New(v.PublicKey())
+	v.OnRevoke(func(instanceID string, generation int) {
+		e.Revoke(instanceID, generation)
+	})
+	pcrSelection := rot.FullPCRSelection()
+
+	const migInstanceID = "vnf-instance-002-migrazione-completa"
+	const targetHost = "host-b.datacenter.local"
+	const newGeneration = 1
+
+	result := runMigrationSourcePhaseForTest(t, v, e, pcrSelection, migInstanceID, targetHost)
+
+	token, cert, ok := runMigrationTargetPhaseForTest(t, v, e, pcrSelection, migInstanceID, result.nMig, newGeneration, nil)
+	if !ok {
+		t.Fatal("CompleteMigration doveva avere successo per una Q_dst genuina con Q_src già validata")
+	}
+	if token == nil || token.Generation != newGeneration {
+		t.Fatalf("Token emesso non corretto: %+v", token)
+	}
+	if cert == nil || cert.OldGeneration != 0 || cert.NewGeneration != newGeneration || cert.TargetHost != targetHost {
+		t.Fatalf("GenerationLinkCert non corretto: %+v", cert)
+	}
+
+	e.UpdateRoutingRules(token)
+	if !e.IsRoutingAllowed(migInstanceID) {
+		t.Fatal("il routing deve essere consentito subito dopo una migrazione riuscita")
+	}
+}
+
+// TestMigrazioneSourceNonValidaBruciaGenerazioneCorrente verifica la
+// scelta di design discussa nel commento di ValidateMigrationSource in
+// verifier.go: una Q_src non valida (qui: una quote TPM realmente
+// firmata, ma per un TargetHost diverso da quello della migrazione
+// avviata) brucia la generazione corrente e nega SUBITO il routing.
+//
+// Questo test usa UN SOLO simulatore TPM (nessun host target coinvolto),
+// quindi continua a usare setupTestSystem/bootstrap come gli altri test
+// non di migrazione in questo file — nessun rischio del problema di
+// blocco descritto sopra.
+func TestMigrazioneSourceNonValidaBruciaGenerazioneCorrente(t *testing.T) {
+	sys := setupTestSystem(t)
+	bootstrap(t, sys)
+
+	if !sys.enforcement.IsRoutingAllowed(sys.instanceID) {
+		t.Fatal("precondizione non soddisfatta: il routing dovrebbe essere aperto prima del tentativo di migrazione")
+	}
+
+	nMig, err := sys.verifier.BeginMigration(sys.instanceID, "host-legittimo")
+	if err != nil {
+		t.Fatalf("BeginMigration: %v", err)
+	}
+
+	// Q_src REALMENTE valida dal punto di vista TPM, ma dichiara un host
+	// di destinazione DIVERSO da quello con cui la migrazione è stata
+	// avviata — dimostra che il controllo non è aggirabile nemmeno con
+	// una firma autentica, perché targetHost è coperto dalla firma
+	// stessa (MigrationSourceBoundNonce).
+	qSrc, err := sys.agent.GetMigrationSourceQuote(0, nMig, sys.pcrSelection, "host-non-autorizzato")
+	if err != nil {
+		t.Fatalf("GetMigrationSourceQuote: %v", err)
+	}
+
+	if ok := sys.verifier.ValidateMigrationSource(sys.instanceID, *qSrc); ok {
+		t.Fatal("ValidateMigrationSource non deve avere successo con un TargetHost diverso da quello della migrazione avviata")
+	}
+
+	if sys.enforcement.IsRoutingAllowed(sys.instanceID) {
+		t.Fatal("una Q_src non valida deve bruciare la generazione corrente e negare IMMEDIATAMENTE il routing, tramite lo stesso canale di revoca già usato per il replay attack")
+	}
+	if records := sys.verifier.BurnRecords(sys.instanceID); len(records) != 1 {
+		t.Fatalf("atteso 1 BurnRecord dopo una Q_src non valida, trovati %d", len(records))
+	}
+}
+
+// TestMigrazioneTargetNonValidaNonComprometteSorgente verifica la scelta
+// di design complementare: un fallimento sul lato TARGET (qui: un Golden
+// Measurement del target non corrispondente) NON deve avere alcuna
+// conseguenza sull'istanza SORGENTE, che aveva già provato sé stessa con
+// successo tramite Q_src — la migrazione viene semplicemente abortita.
+func TestMigrazioneTargetNonValidaNonComprometteSorgente(t *testing.T) {
+	v, err := verifier.New()
+	if err != nil {
+		t.Fatalf("verifier.New: %v", err)
+	}
+	e := enforcement.New(v.PublicKey())
+	v.OnRevoke(func(instanceID string, generation int) {
+		e.Revoke(instanceID, generation)
+	})
+	pcrSelection := rot.FullPCRSelection()
+
+	const migInstanceID = "vnf-instance-002-migrazione-target-fail"
+	const targetHost = "host-b.datacenter.local"
+	const newGeneration = 1
+
+	result := runMigrationSourcePhaseForTest(t, v, e, pcrSelection, migInstanceID, targetHost)
+
+	if !e.IsRoutingAllowed(migInstanceID) {
+		t.Fatal("precondizione non soddisfatta: il routing dovrebbe essere aperto dopo il bootstrap e la validazione di Q_src")
+	}
+
+	// Golden Measurement DELIBERATAMENTE sbagliato per il target — simula
+	// un mismatch (es. un'immagine software diversa da quella approvata
+	// per quella destinazione), indipendentemente da cosa il target abbia
+	// realmente misurato.
+	wrongGolden := []byte("questo-non-e-un-digest-valido-per-il-target")
+
+	token, cert, ok := runMigrationTargetPhaseForTest(t, v, e, pcrSelection, migInstanceID, result.nMig, newGeneration, wrongGolden)
+	if ok || token != nil || cert != nil {
+		t.Fatal("CompleteMigration non deve avere successo con un Golden Measurement del target non corrispondente")
+	}
+
+	// La generazione SORGENTE (g_0, già validata da Q_src) non deve
+	// essere toccata in alcun modo.
+	if records := v.BurnRecords(migInstanceID); len(records) != 0 {
+		t.Fatalf("un fallimento di Q_dst non deve bruciare alcuna generazione, trovati %d BurnRecords", len(records))
+	}
+	if !e.IsRoutingAllowed(migInstanceID) {
+		t.Fatal("un fallimento di Q_dst non deve interrompere il routing della generazione sorgente, ancora valida")
 	}
 }

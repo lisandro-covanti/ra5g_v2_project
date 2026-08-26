@@ -205,3 +205,76 @@ Due strati di difesa indipendenti: un controllo esplicito su
 l'`AttestationBlob`), e il fatto che, anche aggirando quel controllo, il
 confronto crittografico fallirebbe comunque perché il nonce vincolato
 ricalcolato non corrisponderebbe a quello realmente firmato dal TPM.
+
+## Aprire un secondo simulatore TPM mentre uno è ancora attivo si blocca indefinitamente
+
+**Sintomo:** eseguendo `main.go` con la Fase 3 (che coinvolge un host
+sorgente e un host target, ciascuno con il proprio TPM simulato) appena
+aggiunta, l'esecuzione si è bloccata per **oltre due ore** — non un
+errore, non un panic: il processo restava semplicemente vivo e
+silenzioso, fermo esattamente su `rot.OpenSimulator()` per il secondo
+simulatore (quello dell'host target), mentre quello del Setup iniziale
+(istanza `vnf-instance-001`, ancora aperto tramite i suoi `defer`, che
+scattano solo a fine `main()`) era ancora attivo.
+
+**Causa:** `google/go-tpm-tools/simulator` sembra avere una limitazione
+non documentata: **aprire un secondo simulatore mentre un altro è ancora
+vivo nello stesso processo Go si blocca indefinitamente** — quasi
+certamente per uno stato interno globale/condiviso nella libreria
+(probabilmente ereditato dalla sua origine come porting di
+un'implementazione C, pensata per un solo simulatore per processo, come
+tipico in scenari di test dove se ne usa uno alla volta). Non è un
+problema di prestazioni (la generazione di chiavi RSA in un simulatore
+TPM software è comunque un'operazione pesante, ma nell'ordine dei
+secondi, non delle ore) — è un vero blocco strutturale.
+
+**Soluzione:** ristrutturazione di `main.go` (e successivamente di
+`main_test.go`, che aveva lo stesso problema nei suoi test di
+migrazione) in modo che **non ci sia mai più di un simulatore aperto
+contemporaneamente in tutto il processo**. Ogni simulatore vive dentro
+la propria funzione dedicata (`runFasi1a4`, `runMigrationSourcePhase`,
+`runMigrationTargetPhase` in `main.go`; `runMigrationSourcePhaseForTest`,
+`runMigrationTargetPhaseForTest` in `main_test.go`), il cui
+`defer Close()` scatta al **ritorno di quella funzione** — non alla fine
+dell'intero programma/test. In Go, senza l'uso di goroutine, il codice
+di una funzione gira per intero fino al suo `return` prima che
+l'istruzione successiva nel chiamante venga eseguita: l'ordine
+sequenziale delle chiamate garantisce quindi, da solo, che i simulatori
+non siano mai sovrapposti nel tempo, senza bisogno di alcun lock
+esplicito tra loro. Dopo la correzione, l'intera Fase 3 (due simulatori,
+due Attestation Key, quattro operazioni TPM2_Quote) si completa in meno
+di un secondo.
+
+## La collisione in `MigrationSourceBoundNonce`
+
+**Sintomo:**
+```
+--- FAIL: TestMigrationSourceBoundNonceDiversoDaContextBoundNonce (0.00s)
+    model_test.go:316: MigrationSourceBoundNonce e ContextBoundNonce
+    devono produrre valori diversi anche a parità di tag/instanceID/
+    generation/nonce (targetHost vuoto incluso)
+```
+
+**Causa:** un vero bug, scoperto esattamente dal test scritto per
+escluderlo (non durante un'esecuzione manuale — la prova pratica del
+valore dei test di collisione discussi in
+[`04-testing.md`](04-testing.md)). La prima versione di
+`MigrationSourceBoundNonce` scriveva `targetHost` **senza prefisso di
+lunghezza**, in coda a tutti gli altri campi — un'eccezione rispetto
+alla convenzione length-prefix usata ovunque nel progetto per l'unico
+campo di lunghezza variabile a rischio ambiguità. Con `targetHost`
+uguale alla stringa vuota, quella scrittura finale aggiungeva **zero
+byte** al digest: l'output diventava così identico, byte per byte, a
+quello di `ContextBoundNonce(ContextTagMigrate, instanceID, generation,
+nonce)` — vanificando la distinzione tra "quote di Bootstrap/Renew con
+tag Migrate" e "quote di migrazione del lato sorgente" proprio nel caso
+limite (per quanto innocuo in pratica, dato che un `targetHost` vuoto
+non dovrebbe mai comparire in un uso legittimo) più facile da trascurare
+in fase di scrittura del codice.
+
+**Soluzione:** `targetHost` viene ora **sempre** preceduto da 4 byte che
+ne codificano la lunghezza, anche quando è zero. L'output di
+`MigrationSourceBoundNonce` risulta così garantito più lungo — e quindi
+diverso, con probabilità crittograficamente trascurabile di collisione —
+di quello di `ContextBoundNonce` a parità di tutti gli altri campi,
+indipendentemente dal valore di `targetHost`.

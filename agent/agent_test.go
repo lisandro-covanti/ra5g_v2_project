@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"ra5g/cryptoutil"
+	"ra5g/model"
 )
 
 // fakeRootOfTrust implementa rot.RootOfTrust (il tipo concreto non è
@@ -158,8 +159,9 @@ func TestExtendPCRPropagaErroreDelRootOfTrust(t *testing.T) {
 
 // TestGetTPMQuoteCostruisceQuotePayloadCorretto è il test principale di
 // questo file: verifica che GetTPMQuote (1) chiami Attest sul RootOfTrust
-// con esattamente il nonce e la selezione PCR ricevuti, e (2) costruisca
-// un model.QuotePayload con InstanceID/Generation/Nonce corretti e un
+// con la selezione PCR ricevuta e il nonce VINCOLATO AL CONTESTO (non il
+// nonce nudo — vedi il commento sotto), e (2) costruisca un
+// model.QuotePayload con InstanceID/Generation/Nonce/Tag corretti e un
 // AttestationBlob che, deserializzato, corrisponde esattamente
 // all'Attestation restituito dal fake.
 func TestGetTPMQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
@@ -168,8 +170,10 @@ func TestGetTPMQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
 
 	nonce := []byte("nonce-di-test-12345")
 	pcrSelection := []int{0, 1, 7}
+	const generation = 2
+	const tag = model.ContextTagRenew
 
-	quote, err := a.GetTPMQuote(2, nonce, pcrSelection)
+	quote, err := a.GetTPMQuote(generation, nonce, pcrSelection, tag)
 	if err != nil {
 		t.Fatalf("GetTPMQuote: errore inatteso %v", err)
 	}
@@ -178,9 +182,16 @@ func TestGetTPMQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
 	if quote.InstanceID != "vnf-test" {
 		t.Errorf("QuotePayload.InstanceID = %q, atteso %q", quote.InstanceID, "vnf-test")
 	}
-	if quote.Generation != 2 {
-		t.Errorf("QuotePayload.Generation = %d, atteso 2", quote.Generation)
+	if quote.Generation != generation {
+		t.Errorf("QuotePayload.Generation = %d, atteso %d", quote.Generation, generation)
 	}
+	if quote.Tag != tag {
+		t.Errorf("QuotePayload.Tag = %q, atteso %q", quote.Tag, tag)
+	}
+	// Nonce nel QuotePayload deve restare quello ORIGINALE, non
+	// vincolato: è il valore che il Verifier userà per il proprio
+	// bookkeeping (pendingNonces/usedNonces), invariato dal
+	// context-binding.
 	if string(quote.Nonce) != string(nonce) {
 		t.Errorf("QuotePayload.Nonce = %q, atteso %q", quote.Nonce, nonce)
 	}
@@ -188,9 +199,17 @@ func TestGetTPMQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
 		t.Fatal("QuotePayload.AttestationBlob non deve essere vuoto")
 	}
 
-	// --- Verifica che gli argomenti siano stati propagati ad Attest ---
-	if string(fake.lastAttestNonce) != string(nonce) {
-		t.Errorf("Attest è stato chiamato con nonce=%q, atteso %q", fake.lastAttestNonce, nonce)
+	// --- Verifica che ad Attest sia stato passato il nonce VINCOLATO AL
+	// CONTESTO (model.ContextBoundNonce), non il nonce nudo: è il cuore
+	// del meccanismo di context-binding. Ricalcoliamo qui lo stesso
+	// valore che ci aspettiamo GetTPMQuote abbia calcolato internamente,
+	// con la STESSA funzione che userà anche il Verifier per la verifica
+	// (vedi verifier.go) — se questo confronto passasse con il nonce
+	// nudo invece che con quello vincolato, sarebbe un segnale che il
+	// context-binding è stato rimosso o rotto.
+	attesoNonceVincolato := model.ContextBoundNonce(tag, "vnf-test", generation, nonce)
+	if string(fake.lastAttestNonce) != string(attesoNonceVincolato) {
+		t.Error("Attest doveva ricevere il nonce vincolato al contesto (tag+instanceID+generation+nonce), non il nonce nudo")
 	}
 	if len(fake.lastAttestPCRSelection) != len(pcrSelection) {
 		t.Errorf("Attest è stato chiamato con %d PCR selezionati, attesi %d", len(fake.lastAttestPCRSelection), len(pcrSelection))
@@ -207,6 +226,33 @@ func TestGetTPMQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
 	}
 }
 
+// TestGetTPMQuoteTagDiversoProduceNonceVincolatoDiverso verifica in modo
+// mirato la proprietà anti-collisione del context-binding: a parità di
+// nonce nudo, instanceID e generation, un tag diverso (es. Boot vs Renew)
+// deve produrre un nonce vincolato DIVERSO passato ad Attest — è ciò che
+// impedisce a una quote prodotta per un contesto di essere spacciata per
+// un altro.
+func TestGetTPMQuoteTagDiversoProduceNonceVincolatoDiverso(t *testing.T) {
+	fakeBoot := newFakeRootOfTrust(t)
+	aBoot := NewAgent("vnf-test", fakeBoot)
+
+	fakeRenew := newFakeRootOfTrust(t)
+	aRenew := NewAgent("vnf-test", fakeRenew)
+
+	nonce := []byte("stesso-nonce-per-entrambi")
+
+	if _, err := aBoot.GetTPMQuote(0, nonce, []int{0}, model.ContextTagBoot); err != nil {
+		t.Fatalf("GetTPMQuote (boot): %v", err)
+	}
+	if _, err := aRenew.GetTPMQuote(0, nonce, []int{0}, model.ContextTagRenew); err != nil {
+		t.Fatalf("GetTPMQuote (renew): %v", err)
+	}
+
+	if string(fakeBoot.lastAttestNonce) == string(fakeRenew.lastAttestNonce) {
+		t.Fatal("a parità di nonce/instanceID/generation, tag diversi devono produrre nonce vincolati diversi")
+	}
+}
+
 // TestGetTPMQuotePropagaErroreDiAttest verifica che un fallimento del
 // RootOfTrust durante Attest (es. un vero TPM che non riesce a produrre
 // la quote) interrompa GetTPMQuote restituendo l'errore, SENZA restituire
@@ -218,11 +264,105 @@ func TestGetTPMQuotePropagaErroreDiAttest(t *testing.T) {
 
 	a := NewAgent("vnf-test", fake)
 
-	quote, err := a.GetTPMQuote(0, []byte("nonce"), []int{0})
+	quote, err := a.GetTPMQuote(0, []byte("nonce"), []int{0}, model.ContextTagBoot)
 	if err != erroreAtteso {
 		t.Fatalf("GetTPMQuote doveva propagare l'errore di Attest invariato, ottenuto %v", err)
 	}
 	if quote != nil {
 		t.Fatalf("GetTPMQuote doveva restituire un QuotePayload nil in caso di errore, ottenuto %+v", quote)
+	}
+}
+
+// I test seguenti riguardano GetMigrationSourceQuote (Fase 3): la quote
+// con cui l'istanza USCENTE acconsente a una migrazione verso un host di
+// destinazione specifico.
+
+// TestGetMigrationSourceQuoteCostruisceQuotePayloadCorretto verifica che
+// GetMigrationSourceQuote (1) chiami Attest con il nonce vincolato
+// tramite model.MigrationSourceBoundNonce (non ContextBoundNonce, e non
+// il nonce nudo), e (2) costruisca un QuotePayload con Tag=Migrate,
+// Generation=oldGeneration, TargetHost impostato correttamente.
+func TestGetMigrationSourceQuoteCostruisceQuotePayloadCorretto(t *testing.T) {
+	fake := newFakeRootOfTrust(t)
+	a := NewAgent("vnf-test", fake)
+
+	nonce := []byte("nonce-migrazione-di-test")
+	pcrSelection := []int{0, 1}
+	const oldGeneration = 3
+	const targetHost = "host-b.datacenter.local"
+
+	quote, err := a.GetMigrationSourceQuote(oldGeneration, nonce, pcrSelection, targetHost)
+	if err != nil {
+		t.Fatalf("GetMigrationSourceQuote: errore inatteso %v", err)
+	}
+
+	if quote.InstanceID != "vnf-test" {
+		t.Errorf("QuotePayload.InstanceID = %q, atteso %q", quote.InstanceID, "vnf-test")
+	}
+	if quote.Generation != oldGeneration {
+		t.Errorf("QuotePayload.Generation = %d, atteso %d (la generazione USCENTE, non una nuova)", quote.Generation, oldGeneration)
+	}
+	if quote.Tag != model.ContextTagMigrate {
+		t.Errorf("QuotePayload.Tag = %q, atteso %q", quote.Tag, model.ContextTagMigrate)
+	}
+	if quote.TargetHost != targetHost {
+		t.Errorf("QuotePayload.TargetHost = %q, atteso %q", quote.TargetHost, targetHost)
+	}
+	if string(quote.Nonce) != string(nonce) {
+		t.Errorf("QuotePayload.Nonce = %q, atteso %q (il nonce ORIGINALE, non quello vincolato)", quote.Nonce, nonce)
+	}
+
+	// Il nonce dato in pasto al TPM deve essere quello vincolato con
+	// MigrationSourceBoundNonce, non il nonce nudo né quello prodotto da
+	// ContextBoundNonce (che non include targetHost) — ricalcoliamo qui
+	// lo stesso valore con la STESSA funzione che il Verifier userà.
+	atteso := model.MigrationSourceBoundNonce("vnf-test", oldGeneration, nonce, targetHost)
+	if string(fake.lastAttestNonce) != string(atteso) {
+		t.Error("Attest doveva ricevere il nonce vincolato con MigrationSourceBoundNonce (tag+instanceID+oldGeneration+nonce+targetHost)")
+	}
+}
+
+// TestGetMigrationSourceQuoteHostDiversoProduceNonceVincolatoDiverso
+// verifica in modo mirato che due chiamate identiche in tutto TRANNE il
+// targetHost producano nonce vincolati diversi passati ad Attest — è la
+// proprietà che impedisce a una quote di migrazione di essere "dirottata"
+// verso un host diverso da quello per cui è stata prodotta.
+func TestGetMigrationSourceQuoteHostDiversoProduceNonceVincolatoDiverso(t *testing.T) {
+	fakeA := newFakeRootOfTrust(t)
+	agentA := NewAgent("vnf-test", fakeA)
+
+	fakeB := newFakeRootOfTrust(t)
+	agentB := NewAgent("vnf-test", fakeB)
+
+	nonce := []byte("stesso-nonce-di-migrazione")
+
+	if _, err := agentA.GetMigrationSourceQuote(0, nonce, []int{0}, "host-a"); err != nil {
+		t.Fatalf("GetMigrationSourceQuote (host-a): %v", err)
+	}
+	if _, err := agentB.GetMigrationSourceQuote(0, nonce, []int{0}, "host-b"); err != nil {
+		t.Fatalf("GetMigrationSourceQuote (host-b): %v", err)
+	}
+
+	if string(fakeA.lastAttestNonce) == string(fakeB.lastAttestNonce) {
+		t.Fatal("a parità di nonce/instanceID/generation, host di destinazione diversi devono produrre nonce vincolati diversi")
+	}
+}
+
+// TestGetMigrationSourceQuotePropagaErroreDiAttest verifica, come già
+// fatto per GetTPMQuote, che un errore del RootOfTrust venga propagato
+// invariato, senza restituire un QuotePayload parzialmente costruito.
+func TestGetMigrationSourceQuotePropagaErroreDiAttest(t *testing.T) {
+	fake := newFakeRootOfTrust(t)
+	erroreAtteso := errors.New("TPM: quote di migrazione fallita")
+	fake.attestErr = erroreAtteso
+
+	a := NewAgent("vnf-test", fake)
+
+	quote, err := a.GetMigrationSourceQuote(0, []byte("nonce"), []int{0}, "host-b")
+	if err != erroreAtteso {
+		t.Fatalf("GetMigrationSourceQuote doveva propagare l'errore di Attest invariato, ottenuto %v", err)
+	}
+	if quote != nil {
+		t.Fatalf("GetMigrationSourceQuote doveva restituire un QuotePayload nil in caso di errore, ottenuto %+v", quote)
 	}
 }

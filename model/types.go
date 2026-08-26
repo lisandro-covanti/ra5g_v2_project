@@ -1,9 +1,153 @@
 package model
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"time"
 )
+
+// ContextTag identifica IL TIPO DI OPERAZIONE per cui una quote TPM è
+// stata richiesta (bootstrap, rinnovo di lease, migrazione...).
+//
+// PERCHÉ SERVE: senza un context-tag, il nonce che il TPM firma è "nudo"
+// — non porta alcuna informazione su PER COSA è stato richiesto. Una
+// quote valida prodotta in risposta a una challenge di rinnovo, in
+// teoria, potrebbe essere ripresentata con successo come risposta a una
+// challenge di un contesto diverso (es. una migrazione), perché nulla nel
+// dato effettivamente firmato dal TPM lo impedisce esplicitamente — il
+// nonce da solo garantisce "non è un replay dello STESSO scambio", non
+// "è la risposta al tipo di domanda giusta". Legare il tag al nonce prima
+// di firmarlo (vedi ContextBoundNonce sotto) chiude questo spiraglio.
+type ContextTag byte
+
+const (
+	// ContextTagBoot identifica una challenge di Bootstrap (Fase 1:
+	// prima attestazione di una nuova generazione, g=0 o una nuova
+	// generazione dopo un riavvio).
+	ContextTagBoot ContextTag = 0x01
+
+	// ContextTagRenew identifica una challenge di Continuous Attestation
+	// (Fase 2: rinnovo della lease, stessa generazione).
+	ContextTagRenew ContextTag = 0x02
+
+	// ContextTagMigrate identifica una challenge di Migrazione
+	// Cooperativa (Fase 3, non ancora implementata): riservato già da
+	// ora, così che il meccanismo di context-binding sia pronto quando
+	// implementeremo quella fase, invece di doverlo introdurre in corsa.
+	ContextTagMigrate ContextTag = 0x03
+)
+
+// String restituisce un nome leggibile del tag, usato solo per log/errori
+// (es. nei motivi dei BurnRecord) — non incide sulla codifica usata da
+// ContextBoundNonce, che lavora sul valore byte grezzo, non sulla stringa.
+func (c ContextTag) String() string {
+	switch c {
+	case ContextTagBoot:
+		return "boot"
+	case ContextTagRenew:
+		return "renew"
+	case ContextTagMigrate:
+		return "migrate"
+	default:
+		return "sconosciuto"
+	}
+}
+
+// ContextBoundNonce calcola il valore EFFETTIVAMENTE dato in pasto al TPM
+// come ExtraData di TPM2_Quote, legando insieme tag, instanceID,
+// generation e il nonce originale del Verifier in un unico digest SHA-256.
+//
+// Sia l'Agent (che lo calcola prima di chiamare Attest, vedi agent.go) sia
+// il Verifier (che lo ricalcola prima di chiamare server.VerifyAttestation,
+// vedi verifier.go) DEVONO usare esattamente questa stessa funzione, con
+// gli stessi valori, altrimenti la verifica fallirebbe SEMPRE anche per
+// una quote del tutto legittima — è lo stesso principio già visto per
+// Token.SignedBytes()/GenerationLinkCert.SignedBytes(): una codifica
+// canonica condivisa tra chi firma/produce e chi verifica.
+//
+// La codifica usa un prefisso di LUNGHEZZA per instanceID (l'unico campo
+// di lunghezza variabile che precede altri campi) per evitare ambiguità
+// di concatenazione — lo stesso accorgimento già discusso per
+// QuotePayload.SignedBytes() in Fase 1 (rimosso in Fase 2 per quel campo,
+// ma il principio resta valido e qui torna a servire).
+func ContextBoundNonce(tag ContextTag, instanceID string, generation int, nonce []byte) []byte {
+	h := sha256.New()
+
+	h.Write([]byte{byte(tag)})
+
+	idLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(idLen, uint32(len(instanceID)))
+	h.Write(idLen)
+	h.Write([]byte(instanceID))
+
+	gen := make([]byte, 8)
+	binary.BigEndian.PutUint64(gen, uint64(generation))
+	h.Write(gen)
+
+	h.Write(nonce)
+
+	return h.Sum(nil)
+}
+
+// MigrationSourceBoundNonce è l'equivalente di ContextBoundNonce
+// specifico per la quote prodotta dall'istanza USCENTE durante una
+// migrazione (Fase 3). Rispetto a ContextBoundNonce, lega anche
+// TargetHost: nel sequence diagram del protocollo, la quote dell'istanza
+// uscente è firmata su H('migrate' || instanceID || oldGeneration ||
+// n_mig || H_dst) — l'host di destinazione fa parte di ciò che l'istanza
+// uscente attesta, non solo un dato di trasporto.
+//
+// PERCHÉ SERVE (oltre al tag): senza questo, un attaccante che
+// intercetta una quote di migrazione legittima (prodotta col consenso
+// dell'istanza per migrare verso l'host A) potrebbe presentarla al
+// Verifier sostenendo che la migrazione è diretta verso un host B
+// diverso — nulla nella quote lo impedirebbe, perché TargetHost sarebbe
+// solo un campo "di trasporto" non coperto dalla firma TPM. Legandolo nel
+// digest firmato, un TargetHost alterato invalida la firma.
+//
+// Il tag è sempre implicitamente ContextTagMigrate (non è un parametro:
+// questa funzione esiste solo per quel contesto, a differenza della
+// ContextBoundNonce generica usata per Boot/Renew e per la quote
+// dell'istanza ENTRANTE in migrazione, che non necessita di questo
+// legame aggiuntivo con l'host — vedi il commento su CompleteMigration in
+// verifier.go per il perché quella resta sulla ContextBoundNonce generica).
+func MigrationSourceBoundNonce(instanceID string, oldGeneration int, nonce []byte, targetHost string) []byte {
+	h := sha256.New()
+
+	h.Write([]byte{byte(ContextTagMigrate)})
+
+	idLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(idLen, uint32(len(instanceID)))
+	h.Write(idLen)
+	h.Write([]byte(instanceID))
+
+	gen := make([]byte, 8)
+	binary.BigEndian.PutUint64(gen, uint64(oldGeneration))
+	h.Write(gen)
+
+	h.Write(nonce)
+
+	// FIX (scoperto da TestMigrationSourceBoundNonceDiversoDaContextBoundNonce):
+	// TargetHost va SEMPRE preceduto dalla propria lunghezza, anche
+	// quando è la stringa vuota. Senza questo prefisso, con targetHost=""
+	// la scrittura sotto ("h.Write([]byte(targetHost))") aggiunge ZERO
+	// byte al digest — rendendo l'output di questa funzione IDENTICO,
+	// byte per byte, a quello di ContextBoundNonce(ContextTagMigrate,
+	// instanceID, generation, nonce): le due funzioni collidevano ogni
+	// volta che targetHost era vuoto, vanificando la distinzione tra
+	// "quote di Bootstrap/Renew con tag Migrate" e "quote di migrazione
+	// del lato sorgente". Scrivendo SEMPRE i 4 byte di lunghezza (anche
+	// per lunghezza zero), l'output di questa funzione è garantito più
+	// lungo — e quindi diverso — da quello di ContextBoundNonce a parità
+	// di tutti gli altri campi, indipendentemente dal valore di
+	// targetHost.
+	hostLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(hostLen, uint32(len(targetHost)))
+	h.Write(hostLen)
+	h.Write([]byte(targetHost))
+
+	return h.Sum(nil)
+}
 
 // QuotePayload rappresenta l'evidenza prodotta dall'Agent/TPM.
 //
@@ -21,6 +165,21 @@ import (
 type QuotePayload struct {
 	InstanceID string `json:"instance_id"`
 	Generation int    `json:"generation"`
+
+	// Tag identifica per quale tipo di operazione questa quote è stata
+	// prodotta (vedi ContextTag sopra). Il Verifier lo confronta con il
+	// tag che si aspettava per quella specifica challenge, e lo include
+	// nel calcolo di ContextBoundNonce prima di validare la firma TPM.
+	Tag ContextTag `json:"tag"`
+
+	// TargetHost è valorizzato SOLO nella quote prodotta dall'istanza
+	// USCENTE durante una migrazione (Fase 3, tag ContextTagMigrate): è
+	// l'host verso cui la migrazione è diretta, e viene legato
+	// crittograficamente alla quote tramite MigrationSourceBoundNonce
+	// (vedi sotto) — impedisce che una quote di migrazione legittima,
+	// intercettata, venga "dirottata" verso un host diverso da quello per
+	// cui l'istanza uscente ha dato il proprio consenso.
+	TargetHost string `json:"target_host,omitempty"`
 
 	// Nonce è la stessa challenge che il Verifier si aspetta di ritrovare
 	// dentro il campo ExtraData del TPMS_ATTEST incapsulato in

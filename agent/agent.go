@@ -47,12 +47,23 @@ func (a *Agent) ExtendPCR(pcrIndex int, event []byte) error {
 
 // GetTPMQuote produce l'evidenza di attestazione completa (quote TPM
 // standard + event log) per i PCR selezionati, legata al nonce del
-// Verifier. Il tipo di ritorno resta model.QuotePayload — la busta del
-// NOSTRO protocollo applicativo — ma il suo contenuto crittografico ora è
-// prodotto e firmato realmente dal TPM tramite a.RoT.Attest, non più
-// simulato in RAM.
-func (a *Agent) GetTPMQuote(generation int, nonce []byte, pcrSelection []int) (*model.QuotePayload, error) {
-	attestation, err := a.RoT.Attest(pcrSelection, nonce)
+// Verifier E al contesto dell'operazione (tag: bootstrap, rinnovo,
+// migrazione...). Il tipo di ritorno resta model.QuotePayload — la busta
+// del NOSTRO protocollo applicativo — ma il suo contenuto crittografico
+// ora è prodotto e firmato realmente dal TPM tramite a.RoT.Attest, non
+// più simulato in RAM.
+//
+// AGGIORNAMENTO (context-binding del nonce): invece di passare il nonce
+// "nudo" al TPM come ExtraData, calcoliamo prima model.ContextBoundNonce
+// — un digest che lega insieme tag, instanceID, generation e nonce — e
+// facciamo firmare QUELLO al TPM. Il campo QuotePayload.Nonce continua a
+// contenere il nonce originale "in chiaro" (serve al Verifier per il
+// proprio bookkeeping anti-replay, invariato rispetto a prima); è solo
+// ciò che viene effettivamente dato in pasto al TPM a essere cambiato.
+func (a *Agent) GetTPMQuote(generation int, nonce []byte, pcrSelection []int, tag model.ContextTag) (*model.QuotePayload, error) {
+	boundNonce := model.ContextBoundNonce(tag, a.InstanceID, generation, nonce)
+
+	attestation, err := a.RoT.Attest(pcrSelection, boundNonce)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +84,44 @@ func (a *Agent) GetTPMQuote(generation int, nonce []byte, pcrSelection []int) (*
 	return &model.QuotePayload{
 		InstanceID:      a.InstanceID,
 		Generation:      generation,
+		Tag:             tag,
 		Nonce:           nonce,
+		AttestationBlob: blob,
+	}, nil
+}
+
+// GetMigrationSourceQuote produce la quote dell'istanza USCENTE durante
+// una migrazione (Fase 3): equivalente concettuale di GetTPMQuote, ma usa
+// model.MigrationSourceBoundNonce invece di model.ContextBoundNonce,
+// perché in questo caso il TPM deve firmare anche l'host di destinazione
+// (targetHost), non solo tag/instanceID/generation/nonce — vedi il
+// commento su MigrationSourceBoundNonce in model/types.go per il perché.
+//
+// Il campo QuotePayload.Generation contiene la generazione CORRENTE
+// (g_0, quella da cui si sta migrando via), non quella nuova: è coerente
+// con "questa è la prova che l'istanza ATTUALMENTE alla generazione g_0
+// acconsente alla migrazione", non una dichiarazione sulla nuova
+// generazione (che non esiste ancora finché l'istanza target non avrà
+// prodotto la propria quote — vedi CompleteMigration in verifier.go).
+func (a *Agent) GetMigrationSourceQuote(oldGeneration int, nonce []byte, pcrSelection []int, targetHost string) (*model.QuotePayload, error) {
+	boundNonce := model.MigrationSourceBoundNonce(a.InstanceID, oldGeneration, nonce, targetHost)
+
+	attestation, err := a.RoT.Attest(pcrSelection, boundNonce)
+	if err != nil {
+		return nil, err
+	}
+
+	blob, err := marshalAttestation(attestation)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.QuotePayload{
+		InstanceID:      a.InstanceID,
+		Generation:      oldGeneration,
+		Tag:             model.ContextTagMigrate,
+		Nonce:           nonce,
+		TargetHost:      targetHost,
 		AttestationBlob: blob,
 	}, nil
 }

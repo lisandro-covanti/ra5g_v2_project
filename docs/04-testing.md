@@ -47,18 +47,22 @@ resterebbe mascherato da tutti gli altri test, che generano sempre chiavi
 ### `model_test.go`
 Verifica la proprietà anti-collisione delle funzioni di codifica canonica
 (`Token.SignedBytes`, `GenerationLinkCert.SignedBytes`,
-`ContextBoundNonce`): che cambiare un solo campo di input produca sempre
-un output diverso, e che la codifica sia deterministica. Un bug qui
-significherebbe che una firma calcolata per un contenuto potrebbe
-risultare valida anche per un contenuto diverso.
+`ContextBoundNonce`, e dalla Fase 3 anche `MigrationSourceBoundNonce`):
+che cambiare un solo campo di input produca sempre un output diverso, e
+che la codifica sia deterministica. Un bug qui significherebbe che una
+firma calcolata per un contenuto potrebbe risultare valida anche per un
+contenuto diverso — è esattamente il tipo di test che ha scoperto la
+collisione reale in `MigrationSourceBoundNonce` documentata in
+[`03-problemi-e-soluzioni.md`](03-problemi-e-soluzioni.md#la-collisione-in-migrationsourceboundnonce).
 
 ### `agent_test.go`
 Usa un **test double** (`fakeRootOfTrust`, definito nello stesso file)
 che implementa `rot.RootOfTrust` senza toccare alcun TPM — permette di
 verificare la sola logica di `agent.go` (delega corretta a `ExtendPCR`,
 propagazione degli errori, costruzione corretta del `QuotePayload`,
-applicazione del context-binding del nonce) a costo di microsecondi, non
-dei ~30ms che costerebbe ciascun test passando da un vero simulatore TPM.
+applicazione del context-binding del nonce, e dalla Fase 3 di
+`GetMigrationSourceQuote`) a costo di microsecondi, non dei ~30ms che
+costerebbe ciascun test passando da un vero simulatore TPM.
 
 ### `verifier_test.go`
 Test unitari sulla logica di business del Verifier che NON richiede un
@@ -66,6 +70,14 @@ TPM: meccanismo di notifica (`OnRevoke`/hook multipli), guardia su
 `IssueToken` dopo una revoca, rifiuto di un'istanza mai registrata,
 rifiuto per context tag non corrispondente (verificabile senza TPM perché
 quel controllo avviene prima della deserializzazione dell'`AttestationBlob`).
+Dalla Fase 3, copre anche i percorsi di errore "rapidi" di
+`BeginMigration`/`ValidateMigrationSource`/`CompleteMigration` che non
+richiedono una quote TPM realmente valida (istanza non live, TargetHost/
+Generation/nonce non corrispondenti, generazione non crescente, Q_src mai
+validata) e i due test sul TTL della migrazione pendente
+(`DefaultMigrationTTL`), che retrodatano manualmente `ExpiresAt` invece
+di attendere realmente la scadenza — legittimo qui perché il file è
+white-box (vedi sopra).
 
 ### `enforcement_test.go`
 Test unitari sull'Enforcement Plane, costruendo a mano Token firmati con
@@ -78,12 +90,26 @@ e la sua guardia contro notifiche riferite a generazioni ormai superate.
 L'unico livello che esercita l'intero stack **insieme**, TPM simulato
 incluso: Bootstrap, Continuous Attestation, Replay Attack con verifica
 esplicita che il routing si chiuda immediatamente (non al TTL),
-Fail-Closed, e un test end-to-end dedicato che dimostra il rifiuto di una
-quote TPM realmente valida se usata con un context tag sbagliato. È il
-più lento (decine di millisecondi per test) perché ciascun test apre un
-simulatore TPM 2.0 indipendente — nessuno stato condiviso tra un test e
-l'altro, per garantire che l'ordine di esecuzione non influisca sul
-risultato (un requisito che `go test` assume sempre).
+Fail-Closed, un test dedicato che dimostra il rifiuto di una quote TPM
+realmente valida se usata con un context tag sbagliato, e (dalla Fase 3)
+tre test end-to-end di Migrazione Cooperativa — percorso felice completo,
+Q_src non valida che brucia la generazione, Q_dst non valida che aborta
+senza penalizzare la sorgente. È il più lento del progetto (decine di
+millisecondi per test) perché ciascun test apre almeno un simulatore
+TPM 2.0 indipendente.
+
+**Vincolo importante nei test di migrazione**: MAI due simulatori TPM
+aperti contemporaneamente nello stesso test (vedi
+[`03-problemi-e-soluzioni.md`](03-problemi-e-soluzioni.md) per il perché
+— aprirne un secondo mentre un altro è ancora vivo nello stesso processo
+si blocca indefinitamente). I test `TestMigrazioneCooperativaCompleta` e
+`TestMigrazioneTargetNonValidaNonComprometteSorgente` isolano ciascun
+simulatore dentro una funzione helper dedicata
+(`runMigrationSourcePhaseForTest`, `runMigrationTargetPhaseForTest`) il
+cui `defer Close()` scatta al ritorno della funzione stessa — **non**
+tramite `t.Cleanup`, che scatterebbe solo alla fine dell'intero test,
+troppo tardi per garantire che il simulatore sorgente sia già chiuso
+quando quello target viene aperto.
 
 ### `rot/rot.go` — perché non ha un file di test dedicato
 È già esercitato indirettamente e in modo abbastanza completo da

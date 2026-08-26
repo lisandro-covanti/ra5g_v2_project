@@ -120,10 +120,70 @@ Il principio verificato qui: l'assenza di una regola di routing valida
 non equivale MAI a "consentito" — il default, in ogni ramo del codice
 che decide se instradare traffico, è negare.
 
+## Fase 3 — Migrazione Cooperativa (g_0 → g_1)
+
+A differenza di Bootstrap/Renew (dove il Verifier coordina un solo
+scambio challenge/risposta), la Migrazione coinvolge DUE istanze fisiche
+distinte — sorgente e target, su TPM diversi — coordinate in tre chiamate
+separate.
+
+```
+// --- Lato SORGENTE (istanza g_0, in esecuzione) ---
+nMig := v.BeginMigration(instanceID, targetHost)
+    └─ richiede che l'istanza sia attualmente live; genera n_mig e lo
+       registra come migrazione pendente, con scadenza
+       now + DefaultMigrationTTL (vedi sotto)
+
+qSrc := srcAgent.GetMigrationSourceQuote(oldGeneration, nMig, pcrSelection, targetHost)
+    │
+    ├─ boundNonce := model.MigrationSourceBoundNonce(instanceID, oldGeneration, nMig, targetHost)
+    └─ attestation := srcAgent.RoT.Attest(pcrSelection, boundNonce)   ← vero TPM2_Quote, lega ANCHE targetHost
+
+srcOK := v.ValidateMigrationSource(instanceID, *qSrc)
+    │
+    ├─ 1. la migrazione pendente non è scaduta? (DefaultMigrationTTL)
+    ├─ 2. quote.Tag == Migrate?
+    ├─ 3. quote.Generation == generazione live al momento di BeginMigration?
+    ├─ 4. quote.TargetHost == quello di BeginMigration?
+    ├─ 5. nonce == n_mig?
+    ├─ 6. server.VerifyAttestation(...) con Nonce=boundNonce
+    └─ 7. PCRDigest estratto == Golden Measurement della sorgente?
+       → su successo: pending.SourceValidated = true (NESSUNA mutazione
+         di v.live ancora: la fiducia non è concessa finché non arriva
+         anche Q_dst)
+
+// --- Lato TARGET (nuova istanza g_1, su un host diverso) ---
+qDst := dstAgent.GetTPMQuote(newGeneration, nMig, pcrSelection, model.ContextTagMigrate)
+    │
+    └─ usa ContextBoundNonce GENERICO (non MigrationSourceBoundNonce):
+       l'istanza target non "acconsente a migrare verso un host", è già
+       lì fisicamente — attesta solo sé stessa in una nuova generazione
+
+token, cert, ok := v.CompleteMigration(instanceID, newGeneration, *qDst, dstAK, dstGolden)
+    │
+    ├─ richiede pending.SourceValidated == true (Atomic Migration:
+    │  Dual-Sided Authorization — nessuna nuova generazione senza
+    │  consenso PROVATO della sorgente)
+    ├─ valida Q_dst (stesso schema di VerifyQuote)
+    └─ ATOMIC COMMIT, tutto sotto un solo Lock/Unlock:
+       1. registrations[instanceID] aggiornata con AK/Golden del target
+       2/3. issueTokenLocked sovrascrive v.live[instanceID] con g_1
+            (ritira implicitamente g_0, ammette g_1 — mai un istante
+            intermedio con entrambe le generazioni live)
+       4. emette e firma il GenerationLinkCert (g_0 → g_1, target_host)
+
+e.UpdateRoutingRules(token)   → sostituzione atomica della regola di routing
+```
+
+Le due scelte di sicurezza non ovvie da questo solo schema — **Q_src non
+valida brucia la generazione corrente**, **Q_dst non valida aborta senza
+penalizzare la sorgente** — e i dettagli sul TTL della migrazione
+pendente sono spiegati in
+[`06-fase3-migrazione.md`](06-fase3-migrazione.md), non ripetuti qui.
+
 ## Cosa NON è (ancora) coperto da questo flusso
 
-La **Fase 3 (Migrazione Cooperativa)** del sequence diagram originale —
-coordinamento a due lati (istanza uscente + istanza entrante), Atomic
-Commit, `GenerationLinkCert` — non ha ancora un flusso di esecuzione
-implementato. Vedi [`05-roadmap.md`](05-roadmap.md) per lo stato e cosa
-serve per implementarla.
+Il **provisioning EK→AK** (certificazione che un'AK provenga davvero da
+un TPM genuino, sia per `RegisterInstance` sia per `CompleteMigration`) e
+il **livello di trasporto di rete** (il progetto resta volutamente
+in-process) restano aperti — vedi [`05-roadmap.md`](05-roadmap.md).

@@ -18,7 +18,8 @@ vive in [`docs/`](docs/):
 | [`docs/02-flusso-di-esecuzione.md`](docs/02-flusso-di-esecuzione.md) | Cosa succede, passo per passo, in ciascuna fase (Bootstrap, Continuous Attestation, Replay Attack, Fail-Closed) |
 | [`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md) | Log cronologico dei problemi reali incontrati integrando una vera libreria TPM, e come sono stati risolti |
 | [`docs/04-testing.md`](docs/04-testing.md) | Strategia di test, cosa copre ciascun file `_test.go`, come eseguirli |
-| [`docs/05-roadmap.md`](docs/05-roadmap.md) | Cosa è implementato, cosa manca (Fase 3 — Migrazione), limiti noti e non ancora risolti |
+| [`docs/05-roadmap.md`](docs/05-roadmap.md) | Stato del progetto, limiti noti non ancora risolti |
+| [`docs/06-fase3-migrazione.md`](docs/06-fase3-migrazione.md) | La Migrazione Cooperativa: API introdotte, le due scelte di sicurezza (Q_src vs Q_dst), come è garantita l'atomicità |
 
 ## Avvio rapido
 
@@ -54,10 +55,14 @@ la convenzione standard di Go, non serve una cartella `tests/` separata
 ## Stato del progetto
 
 **Implementato e testato:** Fase 1 (Bootstrap), Fase 2 (Continuous
-Attestation), rilevamento e revoca immediata di un replay attack,
-comportamento Fail-Closed, context-binding del nonce (vedi
+Attestation), Fase 3 (Migrazione Cooperativa — vedi
+[`docs/06-fase3-migrazione.md`](docs/06-fase3-migrazione.md)),
+rilevamento e revoca immediata di un replay attack, comportamento
+Fail-Closed, context-binding del nonce (vedi
 [`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md)).
 
-**Non ancora implementato:** Fase 3 (Migrazione Cooperativa tra host) e
-la certificazione EK→AK della catena di fiducia hardware. Dettagli e
-motivazioni in [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Non ancora implementato:** la certificazione EK→AK della catena di
+fiducia hardware (il Verifier si fida della chiave pubblica AK ricevuta
+in fase di onboarding, senza provarne la genuinità hardware) e il
+livello di trasporto di rete (il progetto resta volutamente in-process).
+Dettagli in [`docs/05-roadmap.md`](docs/05-roadmap.md).

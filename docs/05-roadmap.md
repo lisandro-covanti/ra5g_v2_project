@@ -10,45 +10,19 @@
 | Revoca immediata del routing dopo un burn (canale Verifier→Enforcement) | ✅ Implementato, testato — colma il gap "Revoca Immediata Routing" della Fase 4 del diagramma |
 | Comportamento Fail-Closed (token scaduto/non valido/istanza mai vista) | ✅ Implementato, testato |
 | Context-binding del nonce (tag Boot/Renew/Migrate legato crittograficamente al nonce firmato) | ✅ Implementato, testato |
+| Migrazione Cooperativa (Fase 3): Q_src/Q_dst, Atomic Commit, GenerationLinkCert | ✅ Implementato, testato — vedi [`06-fase3-migrazione.md`](06-fase3-migrazione.md) |
 | Integrazione con TPM 2.0 reale via `google/go-tpm-tools`, verificata anche su simulatore software | ✅ Funzionante end-to-end |
 
 ## Cosa NON è implementato
 
-### Fase 3 — Migrazione Cooperativa
+### Fase 3 — Migrazione Cooperativa: IMPLEMENTATA
 
-Il sequence diagram del protocollo descrive un flusso in cui:
-
-1. Il Verifier emette una challenge di migrazione (`nonce n_mig`) legata
-   sia all'istanza uscente sia all'host di destinazione.
-2. L'istanza uscente produce `Q_src` (quote con tag `"migrate"`, già
-   supportato nel codice tramite `model.ContextTagMigrate`, ma non ancora
-   usato in alcun flusso reale).
-3. Una nuova istanza viene avviata sull'host target e produce `Q_dst`,
-   usando **lo stesso** `n_mig`.
-4. Il Verifier esegue un **Atomic Commit**: valida entrambe le quote
-   correlate dallo stesso nonce, poi in un'unica operazione logica
-   ritira la fiducia dalla generazione uscente (`g_0`) e la concede alla
-   nuova (`g_1`).
-5. Viene rilasciato un `GenerationLinkCert` (già definito in `model.go`,
-   mai popolato) che lega crittograficamente le due generazioni.
-
-**Cosa manca concretamente nel codice:** un metodo tipo
-`Verifier.BeginMigration(instanceID, targetHost) (nonce, error)`, la
-logica di validazione dual-quote con commit atomico, l'emissione del
-`GenerationLinkCert`, e un secondo `Agent` (per l'istanza target) nello
-scenario di test/demo.
-
-**Buona notizia architetturale:** l'Enforcement Plane è già pronto a
-sostenere questo flusso senza modifiche — `UpdateRoutingRules` già
-sostituisce atomicamente l'intera regola di routing sotto lock (vedi
-`enforcement.go`), quindi "ritira `g_0`, ammetti `g_1`" funzionerebbe già
-oggi se il Verifier gli passasse il Token corretto per la nuova
-generazione. Il lavoro mancante è tutto a monte, nel Verifier.
-
-**Domanda aperta, non ancora modellata:** se ogni host ha un TPM fisico
-distinto (verosimile), la AK dell'host target va registrata presso il
-Verifier separatamente — quando, e con quale meccanismo di provisioning?
-Non risolto né dal sequence diagram né dal codice attuale.
+A partire da questa versione del progetto, la Fase 3 è implementata e
+testata — vedi [`06-fase3-migrazione.md`](06-fase3-migrazione.md) per i
+dettagli su API, scelte di sicurezza e come è garantita l'atomicità del
+commit. Restano aperti solo i tre limiti descritti in fondo a quel
+documento (provisioning AK del target host, trasporto di rete, timeout
+su una migrazione pendente mai completata).
 
 ### Gap di provisioning EK→AK
 
@@ -84,17 +58,14 @@ sopravviva ai rinnovi.
 
 ## Suggerimento sull'ordine di lavoro futuro
 
-Se si riprende lo sviluppo, l'ordine naturale è:
+Con la Fase 3 ora implementata, l'ordine naturale per il lavoro
+successivo è:
 
-1. **Fase 3 (Migrazione)** — è il pezzo funzionale mancante più grande,
-   e può appoggiarsi sia sul context-binding del nonce (già pronto per il
-   tag `Migrate`) sia sul canale di revoca immediata (già pronto per
-   notificare l'Enforcement in caso di fallimento della migrazione) senza
-   ulteriori modifiche a quei due meccanismi.
-2. **Provisioning EK→AK** — indipendente dalla Fase 3, ma prerequisito
-   per qualunque deployment su hardware reale al di fuori di un ambiente
-   di test.
-3. **Livello di trasporto (gRPC)** — esplicitamente rimandato fin dal
+1. **Provisioning EK→AK** — prerequisito per qualunque deployment su
+   hardware reale al di fuori di un ambiente di test; riguarda sia
+   `RegisterInstance` sia il parametro `newAKPublicKey` di
+   `CompleteMigration`.
+2. **Livello di trasporto (gRPC)** — esplicitamente rimandato fin dal
    documento di analisi originale ("nelle fasi iniziali dell'implementazione,
    NON sviluppare l'infrastruttura di rete gRPC/HTTP"); il codice attuale
    resta volutamente in-process per isolare e verificare la logica di
