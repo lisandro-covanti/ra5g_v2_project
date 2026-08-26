@@ -1,13 +1,63 @@
-# ra5g_v2_project
-Project 5GC Continuos Remote Attestation
+# RA5G — Remote Attestation Protocol per Network Functions 5G Core
 
+Prototipo Go di un protocollo di **Remote Attestation (RA) continua ed elastica**
+per Network Functions virtualizzate/containerizzate (VNF/CNF) in ambienti
+cloud-native 5G Core, basato su un Hardware Root of Trust (TPM 2.0).
 
----RIEPILOGO FILE TEST---
+Il sistema garantisce che il traffico di rete venga instradato verso
+un'istanza VNF/CNF **solo se** quest'ultima si trova in uno stato software
+verificato crittograficamente — con verifica iniziale (Bootstrap), rinnovo
+periodico (Continuous Attestation), e revoca immediata in caso di anomalia.
 
-cryptoutil_test.go verifica il livello crittografico più basso del progetto, quello su cui tutto il resto si appoggia implicitamente: firma e verifica RSA vanno a buon fine sul percorso corretto, ma soprattutto falliscono quando devono fallire — un messaggio alterato anche di un solo carattere, una chiave pubblica sbagliata, input nil. Include anche due test sui nonce (NewNonce): che due chiamate consecutive non producano mai lo stesso valore, e che rispettino la lunghezza richiesta. È il file più importante nonostante sia il più piccolo, perché un bug qui (es. Verify che accetta sempre) resterebbe mascherato da tutti gli altri test, che generano sempre chiavi "coerenti tra loro".
+Questo documento è il punto di ingresso. La documentazione approfondita
+vive in [`docs/`](docs/):
 
-model_test.go si concentra su un rischio sottile: che SignedBytes() (la codifica su cui il Verifier calcola le firme di Token e GenerationLinkCert) produca collisioni — cioè che due contenuti diversi (es. Generation=0 vs Generation=1, o due TargetHost diversi in una futura migrazione) finiscano per produrre esattamente la stessa sequenza di byte da firmare. Se succedesse, una firma varrebbe anche per un contenuto diverso da quello originale, un problema di sicurezza silenzioso. Verifica anche che la codifica sia deterministica (stesso input, sempre stesso output).
+| Documento | Contenuto |
+|---|---|
+| [`docs/01-architettura.md`](docs/01-architettura.md) | Le 5 entità del protocollo, i package Go, il modello dati, chi si fida di chi |
+| [`docs/02-flusso-di-esecuzione.md`](docs/02-flusso-di-esecuzione.md) | Cosa succede, passo per passo, in ciascuna fase (Bootstrap, Continuous Attestation, Replay Attack, Fail-Closed) |
+| [`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md) | Log cronologico dei problemi reali incontrati integrando una vera libreria TPM, e come sono stati risolti |
+| [`docs/04-testing.md`](docs/04-testing.md) | Strategia di test, cosa copre ciascun file `_test.go`, come eseguirli |
+| [`docs/05-roadmap.md`](docs/05-roadmap.md) | Cosa è implementato, cosa manca (Fase 3 — Migrazione), limiti noti e non ancora risolti |
 
-agent_test.go introduce un concetto nuovo rispetto ai file precedenti: un test double — un fakeRootOfTrust scritto apposta per i test, che implementa l'interfaccia rot.RootOfTrust restituendo dati fittizi istantanei invece di parlare con un vero TPM. Grazie a questo, i test verificano solo la logica propria di agent.go (che ExtendPCR deleghi correttamente, che gli errori del RoT vengano propagati intatti, che GetTPMQuote costruisca un QuotePayload corretto e che l'AttestationBlob prodotto, deserializzato, corrisponda esattamente a quanto restituito dal RoT) senza il costo e la lentezza di un TPM reale o simulato — è il beneficio pratico concreto dell'aver isolato quella dipendenza dietro un'interfaccia fin dall'inizio.
+## Avvio rapido
 
-verifier_test.go ed enforcement_test.go (già presenti) coprono invece la logica di business pura di ciascun componente — hook di revoca, Fail-Closed, Generation Exclusivity — mentre main_test.go resta l'unico livello che esercita davvero l'intero stack insieme, TPM simulato incluso, per garantire che i pezzi funzionino correttamente anche una volta assemblati.
+Prerequisiti: Go 1.22+, accesso di rete per risolvere le dipendenze la
+prima volta (non serve un TPM fisico: il progetto usa di default un
+simulatore software).
+
+```bash
+go mod tidy      # risolve google/go-tpm, google/go-tpm-tools, protobuf
+go test ./...    # esegue l'intera suite di test (vedi docs/04-testing.md)
+go run .         # esegue la demo narrata end-to-end (Fase 1 + Fase 2)
+```
+
+## Struttura del progetto
+
+```
+ra5g_v2/
+├── go.mod
+├── main.go              # demo narrata end-to-end (Bootstrap, Continuous Attestation, Replay, Fail-Closed)
+├── main_test.go          # test automatici equivalenti, con asserzioni esplicite
+├── model/                # tipi dati condivisi (QuotePayload, Token, BurnRecord, ContextTag...)
+├── cryptoutil/            # crittografia RSA generica, usata SOLO per le chiavi operative del Verifier (sk_V/pk_V)
+├── rot/                  # interfaccia RootOfTrust + implementazione basata su TPM 2.0 (google/go-tpm-tools)
+├── agent/                # Attestation Agent ($A$): interfaccia il RoT, produce evidenza firmata
+├── verifier/              # Verifier ($V$): unica entità completamente fidata, valida le quote, emette i Token
+└── enforcement/           # Enforcement Plane ($E$): applica le regole di instradamento sulla base dei Token
+```
+
+Ogni package `.go` ha accanto il proprio `_test.go` (dove presente) — è
+la convenzione standard di Go, non serve una cartella `tests/` separata
+(vedi [`docs/04-testing.md`](docs/04-testing.md) per il perché).
+
+## Stato del progetto
+
+**Implementato e testato:** Fase 1 (Bootstrap), Fase 2 (Continuous
+Attestation), rilevamento e revoca immediata di un replay attack,
+comportamento Fail-Closed, context-binding del nonce (vedi
+[`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md)).
+
+**Non ancora implementato:** Fase 3 (Migrazione Cooperativa tra host) e
+la certificazione EK→AK della catena di fiducia hardware. Dettagli e
+motivazioni in [`docs/05-roadmap.md`](docs/05-roadmap.md).
