@@ -1,0 +1,222 @@
+theory RA5G_GenerationExclusivityChain
+begin
+
+/*
+ * ============================================================================
+ * TEST ISOLATO — Generation Exclusivity & Monotonicity lungo una CATENA
+ * di migrazioni (g0 -> g1 -> g2), non solo al primo confine.
+ * ============================================================================
+ * Estende il ragionamento già dimostrato in old_generation_not_routable_
+ * after_migration (valido solo per g0->g1) con una SECONDA migrazione
+ * g1->g2, per dimostrare che la proprietà si COMPONE lungo la catena,
+ * non solo "la prima volta". Nuovo insieme di regole (Migrazione2),
+ * speculare a quello della prima migrazione, con un secondo host target
+ * indipendente ($h2, con la propria Attestation Key ~akSkT2).
+ *
+ * Punto concettuale chiave: chi produce Q_src per la SECONDA migrazione
+ * è l'Agent del PRIMO host target (quello che ha ricevuto g1) — è lui,
+ * ora, l'istanza in esecuzione che deve acconsentire a migrare
+ * ulteriormente. Usa quindi la sua stessa chiave (~akSkT1), non quella
+ * originale dell'host sorgente (~akSk).
+ */
+
+builtins: signing
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+// Host originale (produce g0).
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'),
+    NotYetLive($id), Out(pk(~akSk)) ]
+
+// Primo host target (riceve g1, e sarà lui stesso "sorgente" per la
+// seconda migrazione verso g2).
+rule Setup_TargetAgent1:
+  [ Fr(~akSkT1) ]
+  --[ TargetAgent1Setup($id) ]->
+  [ !AgentKeyTarget1($id, ~akSkT1), !RegisteredTarget1($id, pk(~akSkT1), 'golden'), Out(pk(~akSkT1)) ]
+
+// Secondo host target (riceve g2).
+rule Setup_TargetAgent2:
+  [ Fr(~akSkT2) ]
+  --[ TargetAgent2Setup($id) ]->
+  [ !AgentKeyTarget2($id, ~akSkT2), !RegisteredTarget2($id, pk(~akSkT2), 'golden'), Out(pk(~akSkT2)) ]
+
+/* ---------------------------- Bootstrap (g0) ---------------------------- */
+
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ Pending($id, 'boot', ~n), Out(~n) ]
+
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptBoot:
+  [ Pending($id, 'boot', n),
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    NotYetLive($id)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), MigrationAllowed($id), !Used($id, 'boot', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+/* ------------------------- Prima Migrazione (g0 -> g1) ------------------------- */
+
+rule Verifier_BeginMigration:
+  [ Fr(~nMig), Live($id, 'g0'), MigrationAllowed($id) ]
+  --[ MigrationBegun($id, 'g0', $h, ~nMig) ]->
+  [ PendingMigration($id, 'g0', $h, ~nMig), Live($id, 'g0'), Out(~nMig) ]
+
+rule Agent_ProduceMigrationSourceQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ MigSrcQuoteProduced($id, 'g0', $h, n) ]->
+  [ Out(<<'migrate-src', $id, 'g0', n, $h>,
+         sign(<'migrate-src', $id, 'g0', n, $h>, ~akSk)>) ]
+
+rule Verifier_ValidateMigrationSource:
+  [ PendingMigration($id, 'g0', $h, nMig),
+    In(<<'migrate-src', $id, 'g0', nMig, $h>, sig>),
+    !Registered($id, pkAK, 'golden')
+  ]
+  --[ Eq(verify(sig, <'migrate-src', $id, 'g0', nMig, $h>, pkAK), true),
+      SourceValidated($id, 'g0', $h, nMig) ]->
+  [ SourceOK($id, 'g0', $h, nMig) ]
+
+rule Agent_ProduceMigrationTargetQuote1:
+  [ !AgentKeyTarget1($id, ~akSkT1), In(n) ]
+  --[ MigDstQuoteProduced($id, 'g1', n) ]->
+  [ Out(<<'migrate-dst', $id, 'g1', n>,
+         sign(<'migrate-dst', $id, 'g1', n>, ~akSkT1)>) ]
+
+rule Verifier_CompleteMigration:
+  [ SourceOK($id, 'g0', $h, nMig),
+    In(<<'migrate-dst', $id, 'g1', nMig>, sig>),
+    !RegisteredTarget1($id, pkTargetAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0'),
+    RouteOK($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'migrate-dst', $id, 'g1', nMig>, pkTargetAK), true),
+      MigrationCompleted($id, 'g0', 'g1', $h, nMig) ]->
+  [ Live($id, 'g1'), RouteOK($id, 'g1'), Migration2Allowed($id),
+    Out(<<'token', $id, 'g1'>, sign(<'token', $id, 'g1'>, ~skV)>),
+    Out(<<'genlink', $id, 'g0', 'g1', $h>, sign(<'genlink', $id, 'g0', 'g1', $h>, ~skV)>) ]
+
+/* ------------------------- Seconda Migrazione (g1 -> g2) ------------------------- */
+
+rule Verifier_BeginMigration2:
+  [ Fr(~nMig2), Live($id, 'g1'), Migration2Allowed($id) ]
+  --[ MigrationBegun2($id, 'g1', $h2, ~nMig2) ]->
+  [ PendingMigration2($id, 'g1', $h2, ~nMig2), Live($id, 'g1'), Out(~nMig2) ]
+
+// Chi firma Q_src qui è il PRIMO host target (~akSkT1) — è lui, ora,
+// l'istanza in esecuzione che acconsente a migrare ulteriormente.
+rule Agent_ProduceMigrationSourceQuote2:
+  [ !AgentKeyTarget1($id, ~akSkT1), In(n) ]
+  --[ MigSrcQuoteProduced2($id, 'g1', $h2, n) ]->
+  [ Out(<<'migrate-src2', $id, 'g1', n, $h2>,
+         sign(<'migrate-src2', $id, 'g1', n, $h2>, ~akSkT1)>) ]
+
+rule Verifier_ValidateMigrationSource2:
+  [ PendingMigration2($id, 'g1', $h2, nMig2),
+    In(<<'migrate-src2', $id, 'g1', nMig2, $h2>, sig>),
+    !RegisteredTarget1($id, pkAK, 'golden')
+  ]
+  --[ Eq(verify(sig, <'migrate-src2', $id, 'g1', nMig2, $h2>, pkAK), true),
+      SourceValidated2($id, 'g1', $h2, nMig2) ]->
+  [ SourceOK2($id, 'g1', $h2, nMig2) ]
+
+rule Agent_ProduceMigrationTargetQuote2:
+  [ !AgentKeyTarget2($id, ~akSkT2), In(n) ]
+  --[ MigDstQuoteProduced2($id, 'g2', n) ]->
+  [ Out(<<'migrate-dst2', $id, 'g2', n>,
+         sign(<'migrate-dst2', $id, 'g2', n>, ~akSkT2)>) ]
+
+rule Verifier_CompleteMigration2:
+  [ SourceOK2($id, 'g1', $h2, nMig2),
+    In(<<'migrate-dst2', $id, 'g2', nMig2>, sig>),
+    !RegisteredTarget2($id, pkTargetAK2, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g1'),
+    RouteOK($id, 'g1')
+  ]
+  --[ Eq(verify(sig, <'migrate-dst2', $id, 'g2', nMig2>, pkTargetAK2), true),
+      MigrationCompleted2($id, 'g1', 'g2', $h2, nMig2),
+      GenerationRetracted2($id, 'g1'),
+      GenerationAdmitted2($id, 'g2') ]->
+  [ Live($id, 'g2'), RouteOK($id, 'g2'),
+    Out(<<'token', $id, 'g2'>, sign(<'token', $id, 'g2'>, ~skV)>),
+    Out(<<'genlink', $id, 'g1', 'g2', $h2>, sign(<'genlink', $id, 'g1', 'g2', $h2>, ~skV)>) ]
+
+/* ---------------------------- Restrizioni ---------------------------- */
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+restriction UniqueAgentSetup:
+  "All id #i #j. AgentSetup(id) @ i & AgentSetup(id) @ j ==> #i = #j"
+
+restriction UniqueTargetAgent1Setup:
+  "All id #i #j. TargetAgent1Setup(id) @ i & TargetAgent1Setup(id) @ j ==> #i = #j"
+
+restriction UniqueTargetAgent2Setup:
+  "All id #i #j. TargetAgent2Setup(id) @ i & TargetAgent2Setup(id) @ j ==> #i = #j"
+
+/* ---------------------------- Lemmi ---------------------------- */
+
+// Controllo di sanità: la catena completa (Boot -> Migrazione1 ->
+// Migrazione2) è effettivamente percorribile.
+lemma chain_executability:
+  exists-trace
+  "Ex id h2 n2 #i.
+     MigrationCompleted2(id, 'g1', 'g2', h2, n2) @ i"
+
+// NUOVO — Monotonicità lungo la catena: la prima migrazione (g0->g1)
+// avviene SEMPRE strettamente prima della seconda (g1->g2). Provabile
+// perché Verifier_CompleteMigration2 richiede Live($id,'g1'), prodotto
+// SOLO da Verifier_CompleteMigration (la prima migrazione) — non esiste
+// alcun altro modo di ottenere Live($id,'g1') nel modello.
+lemma migration_chain_strict_ordering:
+  "All id h n h2 n2 #i #j.
+     MigrationCompleted(id, 'g0', 'g1', h, n) @ i &
+     MigrationCompleted2(id, 'g1', 'g2', h2, n2) @ j
+     ==> i < j"
+
+// NUOVO — Generation Exclusivity ESTESA: g0 resta permanentemente non
+// instradabile anche DOPO la seconda migrazione, non solo subito dopo la
+// prima. Dimostra che la proprietà si compone lungo la catena, non è un
+// artefatto valido solo "una tantum" al primo confine.
+lemma old_generation_not_routable_after_second_migration:
+  "All id h2 n2 tag n #i #j.
+     MigrationCompleted2(id, 'g1', 'g2', h2, n2) @ i &
+     Accepted(id, tag, 'g0', n) @ j
+     ==> j < i"
+
+// Migration Atomicity, applicata alla seconda migrazione (g1->g2) —
+// stessa formalizzazione già verificata su ra5g_migration_single.spthy
+// per la prima. Nota di sintassi: #i e #j vanno confrontati con il
+// prefisso # anche nella conclusione (All id gold gnew #i #j. ... ==>
+// #i = #j) — ometterlo dichiara due variabili "libere" non collegate ai
+// punti temporali del quantificatore, un errore reale già incontrato e
+// corretto durante lo sviluppo di questo modello (vedi cronologia in
+// README.md).
+lemma migration_atomicity2:
+  "All id gold gnew #i #j.
+     GenerationRetracted2(id, gold) @ i &
+     GenerationAdmitted2(id, gnew) @ j &
+     (Ex h2 n2 #k. MigrationCompleted2(id, gold, gnew, h2, n2) @ k)
+     ==> #i = #j"
+
+end

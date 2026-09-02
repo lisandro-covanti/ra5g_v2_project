@@ -1,0 +1,132 @@
+theory RA5G_Revocation
+begin
+
+/*
+ * ============================================================================
+ * MODELLO MIRATO — canale di revoca immediata (Boot + Renew + Replay +
+ * Revoca), SENZA la Migrazione.
+ * ============================================================================
+ * AGGIORNAMENTO (causa del blocco isolata e confermata empiricamente su
+ * ra5g_revocation_minimal.spthy): Enforcement_CheckRouting — una regola
+ * che "legge" RouteOK consumandolo e riemettendolo IDENTICO, quindi
+ * applicabile un numero indefinito di volte senza mai cambiare stato —
+ * mandava il risolutore automatico in un vero e proprio ciclo (osservato
+ * direttamente: righe ripetute con RouteOK nell'output). RIMOSSA.
+ *
+ * Il lemma è riformulato in termini di eventi (Accepted, ReplayDetected)
+ * naturalmente limitati per costruzione, invece che tramite una "sonda"
+ * ripetibile a piacere: cattura la stessa proprietà (nessun rinnovo
+ * legittimo può ristabilire il routing per una generazione già
+ * revocata), perché RouteOK($id,g) è un requisito esplicito di
+ * Verifier_AcceptRenew — se DetectReplayAndRevoke lo consuma senza
+ * riemetterlo, AcceptRenew per quella stessa generazione non può più
+ * avvenire, per costruzione.
+ */
+
+/*
+ * AGGIORNAMENTO 2: anche senza Enforcement_CheckRouting, la ricerca
+ * automatica continuava a saturare la memoria — confermato che
+ * Verifier_ChallengeRenew è A SUA VOLTA una regola "a ciclo libero"
+ * (consuma e riemette Live senza mai fermarsi, applicabile un numero
+ * indefinito di volte). Corretto limitando il modello a UN SOLO
+ * rinnovo per istanza, tramite un fatto lineare RenewAllowed emesso una
+ * volta da Verifier_AcceptBoot e consumato (mai riemesso) da
+ * Verifier_ChallengeRenew — stessa tecnica già usata per NotYetLive sul
+ * Bootstrap.
+ *
+ * SEMPLIFICAZIONE DICHIARATA: né lo scenario che vogliamo dimostrare né
+ * main_test.go richiedono più di un rinnovo prima del replay — la
+ * proprietà "nessuna nuova accettazione dopo una revoca" non dipende da
+ * QUANTI rinnovi siano avvenuti prima, quindi limitare il modello a un
+ * solo rinnovo non ne indebolisce la sostanza per questo lemma.
+ */
+
+builtins: signing
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'),
+    NotYetLive($id), Out(pk(~akSk)) ]
+
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ Pending($id, 'boot', ~n), Out(~n) ]
+
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+// AGGIORNATO: emette anche RenewAllowed($id), consumato da
+// Verifier_ChallengeRenew (mai riemesso) — al massimo un rinnovo.
+rule Verifier_AcceptBoot:
+  [ Pending($id, 'boot', n),
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    NotYetLive($id)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), RenewAllowed($id), !Used($id, 'boot', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+// AGGIORNATO: richiede e CONSUMA RenewAllowed($id) — dopo questa
+// regola, nessun secondo rinnovo sarà più possibile per la stessa
+// istanza (limita il modello a un rinnovo, vedi commento in testa al file).
+rule Verifier_ChallengeRenew:
+  [ Fr(~n), Live($id, g), RenewAllowed($id) ]
+  --[ ChallengeIssued($id, 'renew', ~n) ]->
+  [ Pending($id, 'renew', ~n), Live($id, g), Out(~n) ]
+
+rule Agent_ProduceRenewQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'renew', 'g0', n) ]->
+  [ Out(<<'attest', 'renew', $id, 'g0', n>,
+         sign(<'attest', 'renew', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptRenew:
+  [ Pending($id, 'renew', n),
+    In(<<'attest', 'renew', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0'),
+    RouteOK($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'attest', 'renew', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'renew', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), !Used($id, 'renew', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+rule Verifier_DetectReplayAndRevoke:
+  [ !Used($id, tag, n),
+    In(<<'attest', tag, $id, g, n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    RouteOK($id, g)
+  ]
+  --[ Eq(verify(sig, <'attest', tag, $id, g, n>, pkAK), true),
+      ReplayDetected($id, tag, n),
+      RoutingRevoked($id, g) ]->
+  []
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+restriction UniqueAgentSetup:
+  "All id #i #j. AgentSetup(id) @ i & AgentSetup(id) @ j ==> #i = #j"
+
+lemma revocation_effective:
+  "All id g tag n tag2 n2 #i #j.
+     ReplayDetected(id, tag, n) @ i &
+     Accepted(id, tag2, g, n2) @ j
+     ==> j < i"
+
+end

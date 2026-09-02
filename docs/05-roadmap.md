@@ -24,12 +24,18 @@ commit. Restano aperti solo i tre limiti descritti in fondo a quel
 documento (provisioning AK del target host, trasporto di rete, timeout
 su una migrazione pendente mai completata).
 
-### Gap di provisioning EK→AK
+### Assunzione EK→AK (non verificata dal codice)
 
-Il Verifier, in `RegisterInstance`, si fida "per definizione" della
-chiave pubblica AK che riceve durante l'onboarding — non esiste alcuna
-verifica che quella chiave provenga davvero da un TPM genuino e non
-esportabile. In un deployment reale, questo richiederebbe:
+**Assunzione dichiarata del progetto:** ogni coppia EK/AK ricevuta dal
+Verifier è considerata fidata perché si presume già validata, fuori
+banda, contro il certificato EK rilasciato dal produttore del TPM (una
+CA terza — Infineon, STMicroelectronics, Nuvoton, ecc.). Il codice non
+implementa questa verifica: `RegisterInstance` e `CompleteMigration`
+accettano qualunque `crypto.PublicKey` gli venga passata, senza
+distinguere una AK genuina da una chiave software generata da un
+attaccante.
+
+In un deployment reale, chiudere questo gap richiederebbe:
 
 1. Ogni TPM ha una **Endorsement Key (EK)** incisa in fabbrica, con un
    certificato firmato dal produttore del chip.
@@ -42,8 +48,11 @@ esportabile. In un deployment reale, questo richiederebbe:
 
 Questo passaggio non esiste nel codice attuale: `client.AttestationKeyRSA`
 (usata in `rot.go`) crea l'AK ma non esegue alcuna certificazione EK→AK.
-È un limite esplicitamente documentato nei commenti di `rot.go` fin dalla
-sua introduzione, non una svista.
+È un'assunzione esplicitamente dichiarata fin dall'introduzione di
+`rot.go` — il confine tra ciò che il codice garantisce (autenticità della
+firma, integrità dei PCR, anti-replay, monotonicità) e ciò che assume
+come già garantito da un processo di provisioning esterno, non ancora
+implementato in questo progetto.
 
 ### Nonce/handover terminologia — Token rinnovato vs Token esteso
 

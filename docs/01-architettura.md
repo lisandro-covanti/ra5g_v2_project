@@ -110,16 +110,33 @@ senso vincolare la sua chiave operativa a un singolo chip TPM. È l'Agent,
 non il Verifier, ad aver bisogno di un Root of Trust hardware, perché è
 l'Agent a dover provare "sono davvero questa macchina, in questo stato".
 
-## Confini di fiducia — cosa NON è (ancora) risolto
+## Confini di fiducia — l'assunzione sulla catena EK→AK
 
-Il codice attuale presume che, quando il Verifier riceve una chiave
-pubblica AK durante l'onboarding (`RegisterInstance`, e — dalla Fase 3 —
-anche `CompleteMigration` per l'host target), quella chiave provenga
-davvero da un TPM genuino. Questa fiducia è oggi **assunta, non
-verificata**: manca il passo di certificazione EK→AK (challenge
-`TPM2_ActivateCredential` contro un certificato EK di fabbrica) che, in
-un deployment reale, proverebbe che l'AK è davvero vincolata
-all'hardware e non è una semplice chiave software generata da un
-attaccante. È un limite noto, documentato anche nei commenti di
-`rot.go`, e discusso in dettaglio in
-[`05-roadmap.md`](05-roadmap.md#gap-di-provisioning-ekak).
+Il progetto assume, come parte esplicita del proprio modello di
+minaccia, che **ogni coppia Endorsement Key/Attestation Key ricevuta dal
+Verifier sia già stata validata, fuori banda, contro il certificato EK
+rilasciato dal produttore del TPM** (una CA di terze parti — Infineon,
+STMicroelectronics, Nuvoton, ecc. — che certifica che quella EK proviene
+da un chip TPM genuino di quel vendor). In altri termini: il codice non
+verifica MAI direttamente che una AK sia vincolata a un TPM hardware
+reale — si fida che questo controllo sia già avvenuto, altrove, prima
+che la chiave pubblica arrivi a `RegisterInstance` (Bootstrap) o
+`CompleteMigration` (Fase 3, onboarding dell'host target).
+
+Questa non è una scorciatoia arbitraria: è il modello standard con cui
+qualunque sistema di remote attestation stabilisce la fiducia iniziale
+(il TCG stesso definisce l'infrastruttura di riferimento per questa
+catena). È corretto assumerla come **confine dichiarato** del progetto —
+il punto in cui la responsabilità passa da un processo di provisioning
+esterno (non implementato qui) al codice.
+
+**Conseguenza pratica, da tenere presente:** nessuna funzione di questo
+progetto implementa la verifica della catena EK→AK — non esiste una
+chiamata a `TPM2_ActivateCredential`, non c'è validazione di un
+certificato X.509 del produttore, non c'è controllo che la chiave
+ricevuta sia effettivamente non esportabile. `RegisterInstance` e
+`CompleteMigration` accettano qualunque `crypto.PublicKey` venga passata
+loro, senza distinzione tra una AK genuina e una semplice chiave RSA
+software generata da un attaccante. Il limite è documentato anche nei
+commenti di `rot.go`, e discusso in dettaglio in
+[`05-roadmap.md`](05-roadmap.md#assunzione-ekak-non-verificata-dal-codice).

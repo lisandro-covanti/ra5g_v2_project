@@ -61,8 +61,13 @@ rilevamento e revoca immediata di un replay attack, comportamento
 Fail-Closed, context-binding del nonce (vedi
 [`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md)).
 
-**Non ancora implementato:** la certificazione EK→AK della catena di
-fiducia hardware (il Verifier si fida della chiave pubblica AK ricevuta
-in fase di onboarding, senza provarne la genuinità hardware) e il
-livello di trasporto di rete (il progetto resta volutamente in-process).
-Dettagli in [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Assunzione dichiarata:** la catena EK→AK (che una Attestation Key
+provenga da un TPM hardware genuino, certificata dal produttore del chip)
+è considerata fidata a monte del codice, non verificata da esso —
+`RegisterInstance`/`CompleteMigration` accettano la chiave pubblica
+ricevuta senza validarne la provenienza hardware. Dettagli in
+[`docs/05-roadmap.md`](docs/05-roadmap.md#assunzione-ekak-non-verificata-dal-codice).
+
+**Non ancora implementato:** il livello di trasporto di rete (il
+progetto resta volutamente in-process). Dettagli in
+[`docs/05-roadmap.md`](docs/05-roadmap.md).
