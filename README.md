@@ -22,6 +22,8 @@ vive in [`docs/`](docs/):
 | [`docs/06-fase3-migrazione.md`](docs/06-fase3-migrazione.md) | La Migrazione Cooperativa: API introdotte, le due scelte di sicurezza (Q_src vs Q_dst), come è garantita l'atomicità |
 | [`docs/verif/tamarin/README.md`](docs/verif/tamarin/README.md) | Verifica formale con Tamarin Prover (cartella dedicata a sé, separata dal resto di `docs/`): cosa dimostra, mappatura codice↔modello, e — importante — quanto ci si può fidare di un modello formale |
 | [`docs/07-piano-performance.md`](docs/07-piano-performance.md) | Piano operativo della validazione prestazionale (seconda milestone): benchmark per fase, capacità del Verifier, isolamento overhead di protocollo/piattaforma, confronto con lo stato dell'arte, test di resilienza |
+| [`test/benchmarks/README.md`](test/benchmarks/README.md) | Risultati degli Assi 1-3: benchmark per fase, capacità/scalabilità del Verifier, isolamento overhead protocollo/piattaforma |
+| [`test/resilience/README.md`](test/resilience/README.md) | Risultati dell'Asse 5: fault injection sul TPM, stress concorrenziale con race detector, fuzzing di `VerifyQuote` |
 
 ## Avvio rapido
 
@@ -51,6 +53,9 @@ ra5g_v3/
 ├── enforcement/           # Enforcement Plane ($E$): applica le regole di instradamento sulla base dei Token
 ├── docs/                 # documentazione approfondita (vedi indice sopra)
 │   └── verif/tamarin/     # verifica formale (Tamarin Prover) — vedi docs/verif/tamarin/README.md
+└── test/
+    ├── benchmarks/         # benchmark prestazionali (Assi 1-3) — vedi test/benchmarks/README.md
+    └── resilience/         # test di resilienza e fault injection (Asse 5) — vedi test/resilience/README.md
 ```
 
 Ogni package `.go` ha accanto il proprio `_test.go` (dove presente) — è

@@ -17,9 +17,22 @@ Il piano è organizzato in cinque assi, nell'ordine in cui il documento
 di analisi originale li presenta e nell'ordine di dipendenza tra loro
 (gli assi 2 e 3 si appoggiano sui numeri prodotti dall'asse 1).
 
+## Stato di avanzamento
+
+| Asse | Stato | Risultati |
+|---|---|---|
+| 1 — Benchmark per fase | ✅ Completato | [`test/benchmarks/README.md`](../test/benchmarks/README.md) |
+| 2 — Capacità del Verifier | ✅ Completato | [`test/benchmarks/README.md`](../test/benchmarks/README.md) |
+| 3 — Overhead protocollo vs. piattaforma | ✅ Completato | [`test/benchmarks/README.md`](../test/benchmarks/README.md) |
+| 4 — Confronto con la letteratura | ⏳ In sospeso | — (in attesa di reperire/revisionare i paper già raccolti) |
+| 5 — Resilienza e fault injection | ✅ Completato | [`test/resilience/README.md`](../test/resilience/README.md) |
+
 ---
 
 ## Asse 1 — Benchmark per fase del protocollo
+
+**Stato: ✅ Completato** — risultati in
+[`test/benchmarks/README.md`](../test/benchmarks/README.md).
 
 ### Obiettivo
 Sostituire le misure di latenza già presenti nella demo narrata
@@ -67,6 +80,9 @@ riferimento nel capitolo di valutazione.
 ---
 
 ## Asse 2 — Capacità del Verifier e punto di bottleneck
+
+**Stato: ✅ Completato** — risultati in
+[`test/benchmarks/README.md`](../test/benchmarks/README.md).
 
 ### Obiettivo
 Determinare quante istanze VNF concorrenti un singolo Verifier può
@@ -120,6 +136,9 @@ istanze massime per Verifier" derivata dal modello di coda.
 
 ## Asse 3 — Isolamento dell'overhead di piattaforma dall'overhead di protocollo
 
+**Stato: ✅ Completato** — risultati in
+[`test/benchmarks/README.md`](../test/benchmarks/README.md).
+
 ### Obiettivo
 Rispondere in modo quantitativo alla domanda "quanto costa *questo
 protocollo specifico*, al netto di quanto costerebbe comunque
@@ -172,6 +191,9 @@ specificamente nella fase di migrazione.
 
 ## Asse 4 — Confronto con lavori di ricerca esistenti
 
+**Stato: ⏳ In sospeso** — rimandato deliberatamente in attesa di
+reperire e revisionare i paper già raccolti in precedenza.
+
 ### Obiettivo
 Collocare i numeri prodotti dagli Assi 1-3 rispetto allo stato
 dell'arte pubblicato in remote attestation continua, per poter
@@ -209,6 +231,15 @@ attestazione periodica).
 ---
 
 ## Asse 5 — Test di resilienza e fault injection
+
+**Stato: ✅ Completato** — risultati in
+[`test/resilience/README.md`](../test/resilience/README.md). Nota: lo
+scope è stato adattato rispetto a quanto descritto sotto — "tc netem"
+non si applica a un'architettura in-process senza un vero livello di
+trasporto di rete (vedi la sezione "Perché non tc netem" nel README
+collegato per la spiegazione completa e gli strumenti realmente usati:
+fault injection sul TPM, stress concorrenziale con race detector,
+fuzzing).
 
 ### Obiettivo
 Validare empiricamente che il sistema degradi in modo **fail-closed

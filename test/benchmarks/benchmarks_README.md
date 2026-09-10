@@ -476,3 +476,94 @@ al secondo; il numero massimo di istanze sostenibili è approssimativamente
 individuato sopra), posso aiutarti a calcolare questa stima con
 precisione e a confrontarla con la scala tipica di un 5G Core (centinaia
 di Network Function).
+
+---
+
+# Asse 3 — Isolamento overhead di piattaforma vs. overhead di protocollo
+
+`platform_overhead_benchmark_test.go` risponde alla domanda "quanto di
+ciò che abbiamo misurato finora è costo del TPM in sé, e quanto è
+costo specifico della logica che RA5G aggiunge sopra?" — necessaria per
+poter dire, con un numero e non solo a parole, cosa RA5G costa
+*davvero* rispetto ad attestare senza continuità.
+
+## I due benchmark, e cosa isolano
+
+- **`BenchmarkBaselineTPMQuoteNuda`** — una singola `TPM2_Quote`, senza
+  alcuna logica applicativa attorno (niente context-binding, niente
+  `model.QuotePayload`, nessuna verifica). La baseline
+  "hardware/piattaforma pura".
+- **`BenchmarkSingleShotAttestation`** — un ciclo minimo produzione +
+  verifica REALE (stessa primitiva crittografica di `verifier.go`:
+  `tpmtoolsserver.VerifyAttestation` + confronto PCR col Golden
+  Measurement), ma **senza** nessuno dei meccanismi di continuità:
+  niente context-binding del nonce, niente anti-replay, niente Burn
+  Record, niente controllo di monotonicità della generazione.
+
+## Come eseguirli ed interpretarli
+
+```bash
+go test ./test/benchmarks/... -bench="BenchmarkBaselineTPMQuoteNuda|BenchmarkSingleShotAttestation" -benchtime=30x -benchmem -count=10
+```
+
+Il confronto che conta va fatto contro i numeri già raccolti
+nell'Asse 1 (`BenchmarkRenew`, la fase di rinnovo continuo — il
+confronto più diretto, essendo entrambe operazioni "di stato
+stazionario", non di onboarding):
+
+| Confronto | Cosa isola |
+|---|---|
+| `SingleShotAttestation` − `BaselineTPMQuoteNuda` | Costo della verifica crittografica + serializzazione, indipendente da qualunque logica di continuità |
+| `BenchmarkRenew` (Asse 1) − `SingleShotAttestation` | Costo **specifico** della continuità: context-binding, anti-replay, Burn Record, monotonicità — il numero più difendibile per la tesi |
+| `BenchmarkRenew` (Asse 1) − `BaselineTPMQuoteNuda` | Overhead **totale** del protocollo sopra il TPM nudo |
+
+Usa, come sempre in questo progetto, il **minimo** tra le ripetizioni
+come statistica principale per il confronto (non la media/mediana — vedi
+la lezione appresa nell'Asse 2 sopra), dato che stiamo cercando
+differenze potenzialmente piccole tra numeri nello stesso ordine di
+grandezza, esattamente il tipo di confronto dove il rumore di misura
+rischia di più di confondere il segnale.
+
+### Risultato ottenuto
+
+**Attenzione metodologica applicata**: `BenchmarkRenew` va sempre
+rieseguito nella **stessa sessione** dei due nuovi benchmark, non
+riutilizzato da una raccolta dati precedente — un primo confronto fatto
+con un valore di `BenchmarkRenew` misurato in un momento diverso aveva
+prodotto una stima della continuità quasi doppia rispetto a quella
+corretta. Con tutti e tre i valori misurati nella stessa sessione
+(`-benchtime=30x -count=10`, minimo su 10 ripetizioni):
+
+| Benchmark | Minimo | In ms |
+|---|---|---|
+| `BaselineTPMQuoteNuda` (TPM puro) | 2 175 380 ns | **2.175 ms** |
+| `SingleShotAttestation` (+ verifica crittografica) | 2 293 450 ns | **2.293 ms** |
+| `BenchmarkRenew` (protocollo RA5G completo) | 3 117 877 ns | **3.118 ms** |
+
+| Confronto | Valore | % |
+|---|---|---|
+| Crittografia da sola (verifica firma + confronto PCR) | +0.118 ms | 5.4% del TPM nudo |
+| **Continuità specifica** (context-binding, anti-replay, Burn Record, monotonicità, stato del Verifier sotto lock) | **+0.824 ms** | **26.4% del costo totale di un rinnovo** |
+| Overhead totale del protocollo sopra il TPM nudo | +0.942 ms | 43.3% del TPM nudo |
+
+### Interpretazione
+
+Il costo della **verifica crittografica in sé** è marginale (+5.4%
+sopra il TPM nudo) — la firma RSA e il confronto del digest PCR non
+sono il collo di bottiglia del protocollo. Il costo reale sta nella
+**continuità**: poco più di un quarto (26.4%) dell'intero costo di un
+rinnovo è dedicato specificamente ai meccanismi che distinguono RA5G da
+una singola attestazione puntuale — context-binding del nonce,
+tracciamento anti-replay, gestione dei Burn Record, verifica di
+monotonicità, tutto sotto il lock del Verifier.
+
+È un costo reale ma **proporzionato**: meno di un terzo del tempo totale
+va alla continuità, il resto (quasi tre quarti) è comunque speso in
+operazioni TPM genuine (generazione della quote, verifica) che
+qualunque schema di attestazione, continuo o puntuale, dovrebbe
+comunque sostenere. Per la tesi: la continuità **non raddoppia** il
+costo dell'attestazione, come una prima stima non contemporanea aveva
+suggerito — lo aumenta di poco più di un quarto, un prezzo difendibile
+per le garanzie di sicurezza che offre (Fail-Closed, Permanent
+Revocation, Generation Exclusivity — tutte dimostrate formalmente in
+`docs/verif/tamarin/`).
