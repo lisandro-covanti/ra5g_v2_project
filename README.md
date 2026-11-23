@@ -57,7 +57,7 @@ go run .         # esegue la demo narrata end-to-end (Fase 1 + Fase 2)
 ## Struttura del progetto
 
 ```
-ra5g_v2_project/
+5g-cra/
 ├── go.mod
 ├── README.md
 ├── main.go              # demo narrata end-to-end (Bootstrap, Continuous Attestation, Replay, Fail-Closed, Migrazione)
