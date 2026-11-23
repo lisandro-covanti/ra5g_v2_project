@@ -1,4 +1,21 @@
-# RA5G — Remote Attestation Protocol per Network Functions 5G Core
+# 5G-CRA: Continuous Remote Attestation for 5G Core VNFs
+
+Go prototype of the remote attestation protocol presented in the Master's thesis
+*"<titolo della tesi>"* (University of Padua, MSc in Cybersecurity, 2025-2026).
+The version discussed in the thesis is tagged `v1.0-thesis`.
+
+Quick start (Go 1.22+, no physical TPM required, a software simulator is used):
+
+    go mod tidy
+    go test ./...    # full test suite
+    go run .         # end-to-end demo (bootstrap, continuous attestation, migration)
+
+Formal models (Tamarin) are in `docs/verif/tamarin/`, benchmarks and resilience
+tests in `test/`. Detailed documentation in `docs/` is written in Italian.
+
+Licensed under the Apache License 2.0, see `LICENSE`.
+
+---
 
 Prototipo Go di un protocollo di **Remote Attestation (RA) continua ed elastica**
 per Network Functions virtualizzate/containerizzate (VNF/CNF) in ambienti
