@@ -39,8 +39,8 @@ vive in [`docs/`](docs/):
 | [`docs/06-fase3-migrazione.md`](docs/06-fase3-migrazione.md) | La Migrazione Cooperativa: API introdotte, le due scelte di sicurezza (Q_src vs Q_dst), come è garantita l'atomicità |
 | [`docs/verif/tamarin/README.md`](docs/verif/tamarin/README.md) | Verifica formale con Tamarin Prover (cartella dedicata a sé, separata dal resto di `docs/`): cosa dimostra, mappatura codice↔modello, e — importante — quanto ci si può fidare di un modello formale |
 | [`docs/07-piano-performance.md`](docs/07-piano-performance.md) | Piano operativo della validazione prestazionale (seconda milestone): benchmark per fase, capacità del Verifier, isolamento overhead di protocollo/piattaforma, confronto con lo stato dell'arte, test di resilienza |
-| [`test/benchmarks/README.md`](test/benchmarks/README.md) | Risultati degli Assi 1-3: benchmark per fase, capacità/scalabilità del Verifier, isolamento overhead protocollo/piattaforma |
-| [`test/resilience/README.md`](test/resilience/README.md) | Risultati dell'Asse 5: fault injection sul TPM, stress concorrenziale con race detector, fuzzing di `VerifyQuote` |
+| [`test/benchmarks/benchmarks_README.md`](test/benchmarks/benchmarks_README.md) | Risultati degli Assi 1-3: benchmark per fase, capacità/scalabilità del Verifier, isolamento overhead protocollo/piattaforma |
+| [`test/resilience/resilience_README.md`](test/resilience/resilience_README.md) | Risultati dell'Asse 5: fault injection sul TPM, stress concorrenziale con race detector, fuzzing di `VerifyQuote` |
 
 ## Avvio rapido
 
@@ -57,7 +57,7 @@ go run .         # esegue la demo narrata end-to-end (Fase 1 + Fase 2)
 ## Struttura del progetto
 
 ```
-ra5g_v3/
+ra5g_v2_project/
 ├── go.mod
 ├── README.md
 ├── main.go              # demo narrata end-to-end (Bootstrap, Continuous Attestation, Replay, Fail-Closed, Migrazione)
@@ -71,8 +71,8 @@ ra5g_v3/
 ├── docs/                 # documentazione approfondita (vedi indice sopra)
 │   └── verif/tamarin/     # verifica formale (Tamarin Prover) — vedi docs/verif/tamarin/README.md
 └── test/
-    ├── benchmarks/         # benchmark prestazionali (Assi 1-3) — vedi test/benchmarks/README.md
-    └── resilience/         # test di resilienza e fault injection (Asse 5) — vedi test/resilience/README.md
+    ├── benchmarks/         # benchmark prestazionali (Assi 1-3) — vedi test/benchmarks/benchmarks_README.md
+    └── resilience/         # test di resilienza e fault injection (Asse 5) — vedi test/resilience/resilience_README.md
 ```
 
 Ogni package `.go` ha accanto il proprio `_test.go` (dove presente) — è
