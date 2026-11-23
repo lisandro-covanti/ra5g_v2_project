@@ -1,0 +1,114 @@
+theory RA5G_BootRenewReplay_MUTATO
+begin
+
+/*
+ * ============================================================================
+ * VERSIONE VOLUTAMENTE DIFETTOSA — SOLO A SCOPO DIMOSTRATIVO
+ * ============================================================================
+ * Questo NON è un file da usare per validare il progetto. È una copia di
+ * ra5g_boot_renew.spthy con UNA SOLA modifica deliberata, per rispondere
+ * concretamente alla domanda: "un modello Tamarin può essere scritto in
+ * modo da nascondere un'insicurezza reale?"
+ *
+ * LA MUTAZIONE: il fatto "Pending" — che nel modello originale è LINEARE
+ * (consumabile una volta sola, ed è esattamente ciò che garantisce
+ * strutturalmente l'anti-replay) — è stato reso PERSISTENTE (prefisso
+ * "!"), cioè non si consuma mai. Corrisponde, nel codice Go reale, a un
+ * bug tipo "dimenticarsi di controllare usedNonces prima di accettare una
+ * quote" — un errore facile da commettere per davvero.
+ *
+ * SE il lemma no_replay risultasse ANCORA "verified" con questa mutazione,
+ * il modello sarebbe da buttare: vorrebbe dire che non è sensibile a una
+ * vulnerabilità vera e concreta. Se invece Tamarin lo segnala come
+ * "falsified" e mostra un attacco, è la prova che il modello REAGISCE
+ * correttamente quando la sicurezza è davvero compromessa.
+ */
+
+builtins: signing
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'), Out(pk(~akSk)) ]
+
+// ============================================================================
+// MUTAZIONE QUI: "Pending" -> "!Pending" (da lineare a persistente).
+// ============================================================================
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ !Pending($id, 'boot', ~n), Out(~n) ]   // <-- MUTATO: era "Pending(...)"
+
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptBoot:
+  [ !Pending($id, 'boot', n),   // <-- MUTATO: era "Pending(...)"
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+rule Verifier_ChallengeRenew:
+  [ Fr(~n), Live($id, g) ]
+  --[ ChallengeIssued($id, 'renew', ~n) ]->
+  [ !Pending($id, 'renew', ~n), Live($id, g), Out(~n) ]  // <-- MUTATO
+
+rule Agent_ProduceRenewQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'renew', 'g0', n) ]->
+  [ Out(<<'attest', 'renew', $id, 'g0', n>,
+         sign(<'attest', 'renew', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptRenew:
+  [ !Pending($id, 'renew', n),  // <-- MUTATO
+    In(<<'attest', 'renew', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'attest', 'renew', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'renew', 'g0', n) ]->
+  [ Live($id, 'g0'),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+rule Enforcement_AdmitRouting:
+  [ In(<<'token', $id, g>, sig>), !VerifierPubKey(pkV) ]
+  --[ Eq(verify(sig, <'token', $id, g>, pkV), true),
+      RoutingAdmitted($id, g) ]->
+  []
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+lemma executability:
+  exists-trace
+  "Ex id n #i #j.
+     ChallengeIssued(id, 'boot', n) @ i &
+     Accepted(id, 'boot', 'g0', n) @ j &
+     i < j"
+
+lemma fail_closed_requires_valid_attestation:
+  "All id g #i.
+     RoutingAdmitted(id, g) @ i
+     ==> (Ex tag n #j. Accepted(id, tag, g, n) @ j & j < i)"
+
+// Questo lemma, con la mutazione sopra, DEVE risultare "falsified".
+lemma no_replay:
+  "All id tag g n #i #j.
+     Accepted(id, tag, g, n) @ i & Accepted(id, tag, g, n) @ j
+     ==> #i = #j"
+
+end

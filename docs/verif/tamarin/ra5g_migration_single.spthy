@@ -1,0 +1,142 @@
+theory RA5G_MigrationSingle
+begin
+
+/*
+ * ============================================================================
+ * MODELLO MIRATO — SOLO Migrazione singola g0->g1 (senza Renew, senza il
+ * canale di revoca, senza la seconda migrazione), per isolare tutte le
+ * proprietà relative a UNA singola migrazione: raggiungibilità,
+ * Dual-Sided Authorization, ed esclusione della generazione precedente.
+ * ============================================================================
+ * Stesso principio di ra5g_revocation.spthy: rimuove Renew e
+ * DetectReplayAndRevoke/!Used, irrilevanti per queste proprietà, per
+ * ridurre lo spazio di ricerca che Tamarin deve esplorare.
+ */
+
+builtins: signing
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'),
+    NotYetLive($id), Out(pk(~akSk)) ]
+
+rule Setup_TargetAgent:
+  [ Fr(~akSkT) ]
+  --[ TargetAgentSetup($id) ]->
+  [ !AgentKeyTarget($id, ~akSkT), !RegisteredTarget($id, pk(~akSkT), 'golden'), Out(pk(~akSkT)) ]
+
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ Pending($id, 'boot', ~n), Out(~n) ]
+
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptBoot:
+  [ Pending($id, 'boot', n),
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    NotYetLive($id)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), !Used($id, 'boot', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+rule Verifier_BeginMigration:
+  [ Fr(~nMig), Live($id, 'g0') ]
+  --[ MigrationBegun($id, 'g0', $h, ~nMig) ]->
+  [ PendingMigration($id, 'g0', $h, ~nMig), Live($id, 'g0'), Out(~nMig) ]
+
+rule Agent_ProduceMigrationSourceQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ MigSrcQuoteProduced($id, 'g0', $h, n) ]->
+  [ Out(<<'migrate-src', $id, 'g0', n, $h>,
+         sign(<'migrate-src', $id, 'g0', n, $h>, ~akSk)>) ]
+
+rule Verifier_ValidateMigrationSource:
+  [ PendingMigration($id, 'g0', $h, nMig),
+    In(<<'migrate-src', $id, 'g0', nMig, $h>, sig>),
+    !Registered($id, pkAK, 'golden')
+  ]
+  --[ Eq(verify(sig, <'migrate-src', $id, 'g0', nMig, $h>, pkAK), true),
+      SourceValidated($id, 'g0', $h, nMig) ]->
+  [ SourceOK($id, 'g0', $h, nMig) ]
+
+rule Agent_ProduceMigrationTargetQuote:
+  [ !AgentKeyTarget($id, ~akSkT), In(n) ]
+  --[ MigDstQuoteProduced($id, 'g1', n) ]->
+  [ Out(<<'migrate-dst', $id, 'g1', n>,
+         sign(<'migrate-dst', $id, 'g1', n>, ~akSkT)>) ]
+
+rule Verifier_CompleteMigration:
+  [ SourceOK($id, 'g0', $h, nMig),
+    In(<<'migrate-dst', $id, 'g1', nMig>, sig>),
+    !RegisteredTarget($id, pkTargetAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0'),
+    RouteOK($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'migrate-dst', $id, 'g1', nMig>, pkTargetAK), true),
+      MigrationCompleted($id, 'g0', 'g1', $h, nMig),
+      GenerationRetracted($id, 'g0'),
+      GenerationAdmitted($id, 'g1') ]->
+  [ Live($id, 'g1'), RouteOK($id, 'g1'),
+    Out(<<'token', $id, 'g1'>, sign(<'token', $id, 'g1'>, ~skV)>),
+    Out(<<'genlink', $id, 'g0', 'g1', $h>, sign(<'genlink', $id, 'g0', 'g1', $h>, ~skV)>) ]
+
+// RIMOSSA: Enforcement_CheckRouting era la fonte confermata di un ciclo
+// nel risolutore automatico (osservato direttamente su
+// ra5g_revocation_minimal.spthy) — il lemma sotto è stato riformulato
+// per non averne più bisogno.
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+restriction UniqueAgentSetup:
+  "All id #i #j. AgentSetup(id) @ i & AgentSetup(id) @ j ==> #i = #j"
+
+restriction UniqueTargetAgentSetup:
+  "All id #i #j. TargetAgentSetup(id) @ i & TargetAgentSetup(id) @ j ==> #i = #j"
+
+lemma migration_executability:
+  exists-trace
+  "Ex id h n #i.
+     MigrationCompleted(id, 'g0', 'g1', h, n) @ i"
+
+lemma migration_requires_source_validation:
+  "All id h n #i.
+     MigrationCompleted(id, 'g0', 'g1', h, n) @ i
+     ==> (Ex #j. SourceValidated(id, 'g0', h, n) @ j & j < i)"
+
+lemma old_generation_not_routable_after_migration:
+  "All id h n tag n2 #i #j.
+     MigrationCompleted(id, 'g0', 'g1', h, n) @ i &
+     Accepted(id, tag, 'g0', n2) @ j
+     ==> j < i"
+
+// NUOVO — Migration Atomicity: il ritiro della generazione sorgente e
+// l'ammissione della generazione destinazione avvengono SEMPRE nello
+// stesso istante — non esiste una finestra intermedia in cui entrambe,
+// o nessuna delle due, risultino live. In Tamarin non esiste il concetto
+// di "durata": "stesso istante" (i = j) è la traduzione più fedele
+// possibile di "nessuna finestra" che il linguaggio permette.
+lemma migration_atomicity:
+  "All id gold gnew #i #j.
+     GenerationRetracted(id, gold) @ i &
+     GenerationAdmitted(id, gnew) @ j &
+     (Ex h2 n2 #k. MigrationCompleted(id, gold, gnew, h2, n2) @ k)
+     ==> #i = #j"
+
+end

@@ -1,0 +1,152 @@
+theory RA5G_BootRenewReplay
+begin
+
+/*
+ * ============================================================================
+ * MODELLO FORMALE (Tamarin) DEL PROTOCOLLO RA5G — Fase 1: Bootstrap + Renew
+ * ============================================================================
+ * Vedi le versioni precedenti di questo file per lo scopo e i limiti del
+ * modello (Bootstrap, Renew, anti-replay; Migrazione e canale di revoca
+ * rimandati a un secondo modello).
+ *
+ * AGGIORNAMENTO (secondo giro di correzioni): il warning residuo era su
+ * Enforcement_AdmitRouting — la variabile "g" (la generazione dentro il
+ * Token) compariva SOLO dentro il controllo Eq(verify(...)), mai in una
+ * premessa reale: Tamarin non riusciva a considerarla "derivabile".
+ *
+ * Causa di fondo: modellavo il Token come "tutto nascosto dentro la
+ * firma" (sign(<'token', id, g>, skV)) — ma verify() restituisce solo
+ * true/false, MAI il contenuto in chiaro. Non riflette la realtà: nel
+ * codice Go, i campi di model.Token (InstanceID, Generation, IssuedAt,
+ * ExpiresAt) sono TUTTI in chiaro — solo SignatureV è il blob
+ * crittografico opaco. Il Verifier/Enforcement ricostruisce il messaggio
+ * firmato a partire dai campi che già possiede (Token.SignedBytes()), non
+ * lo "apre" dalla firma.
+ *
+ * Corretto: ogni messaggio firmato ora viaggia come COPPIA
+ * <testo_in_chiaro, firma>, non con il testo nascosto dentro la firma —
+ * lo stesso schema usato ovunque nella letteratura Tamarin per messaggi
+ * firmati, ed è anche più fedele al codice Go reale.
+ */
+
+builtins: signing
+
+/* ----------------------------------------------------------------------
+ * SETUP
+ * ---------------------------------------------------------------------- */
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'), Out(pk(~akSk)) ]
+
+/* ----------------------------------------------------------------------
+ * FASE 1 — BOOTSTRAP (generation = 'g0', tag = 'boot')
+ * ---------------------------------------------------------------------- */
+
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ Pending($id, 'boot', ~n), Out(~n) ]
+
+// AGGIORNATO: invia <testo_in_chiaro, firma> invece di nascondere il
+// testo dentro sign(...) — testo_in_chiaro = <'attest','boot',id,gen,nonce>.
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+// AGGIORNATO: In(<...>) ora pattern-matcha DIRETTAMENTE sulla coppia
+// ricevuta — $id e n, già vincolati da Pending($id,'boot',n), devono
+// corrispondere esattamente al testo in chiaro ricevuto (pura
+// destrutturazione di tupla, sempre "derivabile" per Tamarin — diverso
+// dall'estrarre un argomento da dentro sign(), che aveva causato i
+// warning precedenti). sig resta opaca, verificata esplicitamente sotto.
+rule Verifier_AcceptBoot:
+  [ Pending($id, 'boot', n),
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+/* ----------------------------------------------------------------------
+ * FASE 2 — CONTINUOUS ATTESTATION / RENEW
+ * ---------------------------------------------------------------------- */
+
+rule Verifier_ChallengeRenew:
+  [ Fr(~n), Live($id, g) ]
+  --[ ChallengeIssued($id, 'renew', ~n) ]->
+  [ Pending($id, 'renew', ~n), Live($id, g), Out(~n) ]
+
+rule Agent_ProduceRenewQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'renew', 'g0', n) ]->
+  [ Out(<<'attest', 'renew', $id, 'g0', n>,
+         sign(<'attest', 'renew', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptRenew:
+  [ Pending($id, 'renew', n),
+    In(<<'attest', 'renew', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'attest', 'renew', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'renew', 'g0', n) ]->
+  [ Live($id, 'g0'),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+/* ----------------------------------------------------------------------
+ * ENFORCEMENT
+ * ---------------------------------------------------------------------- */
+
+// AGGIORNATO (la correzione che risolve il warning residuo): $id e g
+// sono ora vincolati DIRETTAMENTE dal testo in chiaro ricevuto in
+// In(<<'token',$id,g>, sig>) — pura destrutturazione, non più
+// un'estrazione da dentro la firma. sig resta opaca, verificata
+// esplicitamente contro la chiave pubblica nota.
+rule Enforcement_AdmitRouting:
+  [ In(<<'token', $id, g>, sig>), !VerifierPubKey(pkV) ]
+  --[ Eq(verify(sig, <'token', $id, g>, pkV), true),
+      RoutingAdmitted($id, g) ]->
+  []
+
+/* ----------------------------------------------------------------------
+ * RESTRIZIONE
+ * ---------------------------------------------------------------------- */
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+/* ----------------------------------------------------------------------
+ * LEMMI — INVARIATI
+ * ---------------------------------------------------------------------- */
+
+lemma executability:
+  exists-trace
+  "Ex id n #i #j.
+     ChallengeIssued(id, 'boot', n) @ i &
+     Accepted(id, 'boot', 'g0', n) @ j &
+     i < j"
+
+lemma fail_closed_requires_valid_attestation:
+  "All id g #i.
+     RoutingAdmitted(id, g) @ i
+     ==> (Ex tag n #j. Accepted(id, tag, g, n) @ j & j < i)"
+
+lemma no_replay:
+  "All id tag g n #i #j.
+     Accepted(id, tag, g, n) @ i & Accepted(id, tag, g, n) @ j
+     ==> #i = #j"
+
+end

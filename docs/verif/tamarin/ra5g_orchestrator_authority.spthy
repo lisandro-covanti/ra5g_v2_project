@@ -1,0 +1,86 @@
+theory RA5G_OrchestratorAuthority
+begin
+
+/*
+ * ============================================================================
+ * TEST ISOLATO — orchestrator_non_authority_attestation (Boot + Renew)
+ * ============================================================================
+ * Stesso insieme di regole già collaudato in ra5g_revocation.spthy (senza
+ * Verifier_DetectReplayAndRevoke, non necessaria per QUESTO lemma), con
+ * un solo lemma nuovo da verificare: ogni Accepted (Boot o Renew)
+ * richiede che l'Agent abbia REALMENTE prodotto la quote corrispondente
+ * — formalizzazione esplicita di "Orchestrator Non-Authority".
+ */
+
+builtins: signing
+
+rule Setup_Verifier:
+  [ Fr(~skV) ]
+  --[ VerifierSetup() ]->
+  [ !VerifierKey(~skV), !VerifierPubKey(pk(~skV)), Out(pk(~skV)) ]
+
+rule Setup_Agent:
+  [ Fr(~akSk) ]
+  --[ AgentSetup($id) ]->
+  [ !AgentKey($id, ~akSk), !Registered($id, pk(~akSk), 'golden'),
+    NotYetLive($id), Out(pk(~akSk)) ]
+
+rule Verifier_ChallengeBoot:
+  [ Fr(~n) ]
+  --[ ChallengeIssued($id, 'boot', ~n) ]->
+  [ Pending($id, 'boot', ~n), Out(~n) ]
+
+rule Agent_ProduceBootQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'boot', 'g0', n) ]->
+  [ Out(<<'attest', 'boot', $id, 'g0', n>,
+         sign(<'attest', 'boot', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptBoot:
+  [ Pending($id, 'boot', n),
+    In(<<'attest', 'boot', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    NotYetLive($id)
+  ]
+  --[ Eq(verify(sig, <'attest', 'boot', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'boot', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), RenewAllowed($id), !Used($id, 'boot', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+rule Verifier_ChallengeRenew:
+  [ Fr(~n), Live($id, g), RenewAllowed($id) ]
+  --[ ChallengeIssued($id, 'renew', ~n) ]->
+  [ Pending($id, 'renew', ~n), Live($id, g), Out(~n) ]
+
+rule Agent_ProduceRenewQuote:
+  [ !AgentKey($id, ~akSk), In(n) ]
+  --[ QuoteProduced($id, 'renew', 'g0', n) ]->
+  [ Out(<<'attest', 'renew', $id, 'g0', n>,
+         sign(<'attest', 'renew', $id, 'g0', n>, ~akSk)>) ]
+
+rule Verifier_AcceptRenew:
+  [ Pending($id, 'renew', n),
+    In(<<'attest', 'renew', $id, 'g0', n>, sig>),
+    !Registered($id, pkAK, 'golden'),
+    !VerifierKey(~skV),
+    Live($id, 'g0'),
+    RouteOK($id, 'g0')
+  ]
+  --[ Eq(verify(sig, <'attest', 'renew', $id, 'g0', n>, pkAK), true),
+      Accepted($id, 'renew', 'g0', n) ]->
+  [ Live($id, 'g0'), RouteOK($id, 'g0'), !Used($id, 'renew', n),
+    Out(<<'token', $id, 'g0'>, sign(<'token', $id, 'g0'>, ~skV)>) ]
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+restriction UniqueAgentSetup:
+  "All id #i #j. AgentSetup(id) @ i & AgentSetup(id) @ j ==> #i = #j"
+
+lemma orchestrator_non_authority_attestation:
+  "All id tag g n #i.
+     Accepted(id, tag, g, n) @ i
+     ==> Ex #j. QuoteProduced(id, tag, g, n) @ j & j < i"
+
+end

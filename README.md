@@ -37,6 +37,10 @@ vive in [`docs/`](docs/):
 | [`docs/04-testing.md`](docs/04-testing.md) | Strategia di test, cosa copre ciascun file `_test.go`, come eseguirli |
 | [`docs/05-roadmap.md`](docs/05-roadmap.md) | Stato del progetto, limiti noti non ancora risolti |
 | [`docs/06-fase3-migrazione.md`](docs/06-fase3-migrazione.md) | La Migrazione Cooperativa: API introdotte, le due scelte di sicurezza (Q_src vs Q_dst), come è garantita l'atomicità |
+| [`docs/verif/tamarin/README.md`](docs/verif/tamarin/README.md) | Verifica formale con Tamarin Prover (cartella dedicata a sé, separata dal resto di `docs/`): cosa dimostra, mappatura codice↔modello, e — importante — quanto ci si può fidare di un modello formale |
+| [`docs/07-piano-performance.md`](docs/07-piano-performance.md) | Piano operativo della validazione prestazionale (seconda milestone): benchmark per fase, capacità del Verifier, isolamento overhead di protocollo/piattaforma, confronto con lo stato dell'arte, test di resilienza |
+| [`test/benchmarks/README.md`](test/benchmarks/README.md) | Risultati degli Assi 1-3: benchmark per fase, capacità/scalabilità del Verifier, isolamento overhead protocollo/piattaforma |
+| [`test/resilience/README.md`](test/resilience/README.md) | Risultati dell'Asse 5: fault injection sul TPM, stress concorrenziale con race detector, fuzzing di `VerifyQuote` |
 
 ## Avvio rapido
 
@@ -53,16 +57,22 @@ go run .         # esegue la demo narrata end-to-end (Fase 1 + Fase 2)
 ## Struttura del progetto
 
 ```
-ra5g_v2/
+ra5g_v3/
 ├── go.mod
-├── main.go              # demo narrata end-to-end (Bootstrap, Continuous Attestation, Replay, Fail-Closed)
+├── README.md
+├── main.go              # demo narrata end-to-end (Bootstrap, Continuous Attestation, Replay, Fail-Closed, Migrazione)
 ├── main_test.go          # test automatici equivalenti, con asserzioni esplicite
 ├── model/                # tipi dati condivisi (QuotePayload, Token, BurnRecord, ContextTag...)
 ├── cryptoutil/            # crittografia RSA generica, usata SOLO per le chiavi operative del Verifier (sk_V/pk_V)
 ├── rot/                  # interfaccia RootOfTrust + implementazione basata su TPM 2.0 (google/go-tpm-tools)
 ├── agent/                # Attestation Agent ($A$): interfaccia il RoT, produce evidenza firmata
 ├── verifier/              # Verifier ($V$): unica entità completamente fidata, valida le quote, emette i Token
-└── enforcement/           # Enforcement Plane ($E$): applica le regole di instradamento sulla base dei Token
+├── enforcement/           # Enforcement Plane ($E$): applica le regole di instradamento sulla base dei Token
+├── docs/                 # documentazione approfondita (vedi indice sopra)
+│   └── verif/tamarin/     # verifica formale (Tamarin Prover) — vedi docs/verif/tamarin/README.md
+└── test/
+    ├── benchmarks/         # benchmark prestazionali (Assi 1-3) — vedi test/benchmarks/README.md
+    └── resilience/         # test di resilienza e fault injection (Asse 5) — vedi test/resilience/README.md
 ```
 
 Ogni package `.go` ha accanto il proprio `_test.go` (dove presente) — è
@@ -78,8 +88,13 @@ rilevamento e revoca immediata di un replay attack, comportamento
 Fail-Closed, context-binding del nonce (vedi
 [`docs/03-problemi-e-soluzioni.md`](docs/03-problemi-e-soluzioni.md)).
 
-**Non ancora implementato:** la certificazione EK→AK della catena di
-fiducia hardware (il Verifier si fida della chiave pubblica AK ricevuta
-in fase di onboarding, senza provarne la genuinità hardware) e il
-livello di trasporto di rete (il progetto resta volutamente in-process).
-Dettagli in [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Assunzione dichiarata:** la catena EK→AK (che una Attestation Key
+provenga da un TPM hardware genuino, certificata dal produttore del chip)
+è considerata fidata a monte del codice, non verificata da esso —
+`RegisterInstance`/`CompleteMigration` accettano la chiave pubblica
+ricevuta senza validarne la provenienza hardware. Dettagli in
+[`docs/05-roadmap.md`](docs/05-roadmap.md#assunzione-ekak-non-verificata-dal-codice).
+
+**Non ancora implementato:** il livello di trasporto di rete (il
+progetto resta volutamente in-process). Dettagli in
+[`docs/05-roadmap.md`](docs/05-roadmap.md).
